@@ -175,7 +175,6 @@ Launch any app by its display name — matches against what's installed on your 
 | `lgtv screen-off` | Turn off screen (audio continues) |
 | `lgtv picture-mode <mode>` | Set picture mode (standard, vivid, cinema, game, etc.) |
 | `lgtv sound-mode <mode>` | Set sound mode (standard, cinema, game, etc.) |
-| `lgtv sleep <minutes>` | Set sleep timer (0 to cancel) |
 | `lgtv subtitles` | Toggle subtitles |
 | `lgtv audio-track` | Cycle through audio tracks |
 | `lgtv info` | Show channel/media info on screen |
@@ -187,6 +186,8 @@ Launch any app by its display name — matches against what's installed on your 
 | `lgtv number <0-9>` | Send a number key press |
 
 ### Service Menus (Advanced)
+
+These menus require a password. The default is usually **0413**. Other common codes: **0000**, **7777**.
 
 | Command | Description |
 |---------|-------------|

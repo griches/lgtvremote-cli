@@ -1322,11 +1322,6 @@ def cmd_sound_mode(args):
 
 
 # --- Sleep Timer ---
-def cmd_sleep(args):
-    _run_command(args, "ssap://com.webos.service.settings/setSystemSettings",
-                 {"category": "system", "settings": {"sleepTimer": args.minutes}})
-    print(f"Sleep timer set to {args.minutes} minutes.")
-
 
 # --- Info ---
 def cmd_info(args):
@@ -1584,9 +1579,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_snd = sub.add_parser("sound-mode", help="Set sound mode")
     p_snd.add_argument("mode", help="Sound mode (e.g., standard, cinema, game)")
 
-    p_slp = sub.add_parser("sleep", help="Set sleep timer")
-    p_slp.add_argument("minutes", type=int, help="Minutes until TV turns off (0 to cancel)")
-
     sub.add_parser("subtitles", help="Toggle subtitles")
     sub.add_parser("audio-track", help="Cycle audio track")
     sub.add_parser("info", help="Show channel/media info on screen")
@@ -1641,7 +1633,6 @@ def main():
         "screen-off": cmd_screen_off,
         "picture-mode": cmd_picture_mode,
         "sound-mode": cmd_sound_mode,
-        "sleep": cmd_sleep,
         "subtitles": cmd_subtitles,
         "audio-track": cmd_audio_track,
         "info": cmd_info,
