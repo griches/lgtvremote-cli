@@ -168,17 +168,6 @@ Launch any app by its display name — matches against what's installed on your 
 | `settings` | `com.webos.app.settings` |
 | `browser` | `com.webos.app.browser` |
 
-### Display & Settings
-
-| Command | Description |
-|---------|-------------|
-| `lgtv screen-off` | Turn off screen (audio continues) |
-| `lgtv picture-mode <mode>` | Set picture mode (standard, vivid, cinema, game, etc.) |
-| `lgtv sound-mode <mode>` | Set sound mode (standard, cinema, game, etc.) |
-| `lgtv subtitles` | Toggle subtitles |
-| `lgtv audio-track` | Cycle through audio tracks |
-| `lgtv info` | Show channel/media info on screen |
-
 ### Number Keys
 
 | Command | Description |
