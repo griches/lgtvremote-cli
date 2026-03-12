@@ -673,31 +673,146 @@ def _fetch_macs_via_ws(ip: str, client_key: str) -> dict:
 # Command handlers
 # ---------------------------------------------------------------------------
 
+def _do_pair(ip: str, cfg: dict) -> bool:
+    """Pair with a TV. Returns True on success. Saves client key and MACs to cfg."""
+    name = cfg["devices"].get(ip, {}).get("name", ip)
+    print(f"Pairing with {name} ({ip})...")
+
+    try:
+        ws = WebSocket.connect(f"wss://{ip}:3001", timeout=10)
+    except (OSError, TimeoutError, ConnectionError) as e:
+        print(f"  Could not connect: {e}")
+        return False
+
+    reg_msg = {
+        "type": "register",
+        "id": str(uuid.uuid4()),
+        "payload": {
+            **REGISTRATION_PAYLOAD,
+            "pairingType": "PIN",
+            "forcePairing": False,
+        },
+    }
+    ws.send(json.dumps(reg_msg))
+
+    pin_requested = False
+    start = time.monotonic()
+    while time.monotonic() - start < 60:
+        try:
+            raw = ws.recv(timeout=30)
+        except (socket.timeout, TimeoutError, ConnectionError):
+            break
+
+        resp = json.loads(raw)
+        resp_type = resp.get("type", "")
+        payload = resp.get("payload", {})
+
+        if resp_type == "registered" or "client-key" in payload:
+            key = payload.get("client-key")
+            if key:
+                cfg["devices"][ip]["client_key"] = key
+                _save_config(cfg)
+                print("  Paired successfully!")
+                ws.close()
+
+                # Fetch real MAC addresses
+                print("  Fetching MAC addresses...")
+                macs = _fetch_macs_via_ws(ip, key)
+                if macs:
+                    cfg["devices"][ip].update(macs)
+                    _save_config(cfg)
+                    for k, v in macs.items():
+                        label = "MAC (wired)" if k == "mac" else "MAC (wifi)"
+                        print(f"  {label}: {v}")
+                return True
+
+        elif payload.get("pairingType") in ("PIN", "pin") and not pin_requested:
+            pin = input("  Enter the PIN shown on your TV: ").strip()
+            pin_msg = {
+                "type": "request",
+                "id": str(uuid.uuid4()),
+                "uri": "ssap://pairing/setPin",
+                "payload": {"pin": pin},
+            }
+            ws.send(json.dumps(pin_msg))
+            pin_requested = True
+
+        elif resp_type == "error":
+            print(f"  Pairing failed: {resp.get('error', 'Unknown error')}")
+            ws.close()
+            return False
+
+    print("  Pairing timed out.")
+    ws.close()
+    return False
+
+
 def cmd_scan(args):
-    """Scan the local network for LG webOS TVs."""
+    """Scan the local network for LG webOS TVs, add them, and pair."""
     print("Scanning for LG webOS TVs...")
     devices = _ssdp_discover(timeout=args.timeout if hasattr(args, "timeout") else 5.0)
     if not devices:
         print("No TVs found. Ensure your TV is on and on the same network.")
         return
 
+    cfg = _load_config()
+
     print(f"\nFound {len(devices)} TV(s):\n")
     for d in devices:
-        info = _enrich_device(d["ip"], location=d.get("location"))
+        ip = d["ip"]
+        info = _enrich_device(ip, location=d.get("location"))
         name = info.get("name", d["name"])
-        print(f"  {name}")
-        print(f"    IP: {d['ip']}")
+
+        # Auto-add the device
+        device = cfg["devices"].get(ip, {"ip": ip})
+        device["ip"] = ip
+        if info.get("name"):
+            device["name"] = info["name"]
+        elif "name" not in device:
+            device["name"] = name
+        if info.get("model"):
+            device["model"] = info["model"]
+        cfg["devices"][ip] = device
+        if not cfg.get("default"):
+            cfg["default"] = ip
+        _save_config(cfg)
+
+        already_paired = bool(device.get("client_key"))
+        print(f"  {device.get('name', ip)}")
+        print(f"    IP: {ip}")
         if info.get("model"):
             print(f"    Model: {info['model']}")
-        if info.get("mac"):
-            print(f"    MAC: {info['mac']}")
-        if info.get("wifi_mac"):
-            print(f"    MAC (wifi): {info['wifi_mac']}")
+        if already_paired:
+            print(f"    Status: already paired")
+            # Fetch MACs if missing
+            if not device.get("mac") and not device.get("wifi_mac"):
+                macs = _fetch_macs_via_ws(ip, device["client_key"])
+                if macs:
+                    device.update(macs)
+                    _save_config(cfg)
+            if device.get("mac"):
+                print(f"    MAC: {device['mac']}")
+            if device.get("wifi_mac"):
+                print(f"    MAC (wifi): {device['wifi_mac']}")
+        else:
+            print(f"    Status: new — pairing required")
+
         print()
+
+    # Offer to pair any unpaired devices
+    unpaired = [ip for ip, d in cfg["devices"].items()
+                if not d.get("client_key") and ip in {dev["ip"] for dev in devices}]
+    if unpaired:
+        for ip in unpaired:
+            name = cfg["devices"][ip].get("name", ip)
+            answer = input(f"Pair with {name} ({ip})? [Y/n] ").strip().lower()
+            if answer in ("", "y", "yes"):
+                _do_pair(ip, cfg)
+            print()
 
 
 def cmd_add(args):
-    """Add a TV by IP address."""
+    """Add a TV by IP address, enrich, and pair."""
     cfg = _load_config()
     ip = args.ip
 
@@ -715,12 +830,10 @@ def cmd_add(args):
     if not args.no_enrich:
         print(f"Fetching device info from {ip}...")
         info = _enrich_device(ip)
+        if info.get("name") and not args.name and device.get("name") == ip:
+            device["name"] = info["name"]
         if info.get("model") and "model" not in device:
             device["model"] = info["model"]
-        if info.get("mac") and "mac" not in device:
-            device["mac"] = info["mac"]
-        if info.get("wifi_mac") and "wifi_mac" not in device:
-            device["wifi_mac"] = info["wifi_mac"]
 
     cfg["devices"][ip] = device
     if not cfg.get("default"):
@@ -731,8 +844,21 @@ def cmd_add(args):
     print(f"Added TV: {name} ({ip})")
     if device.get("model"):
         print(f"  Model: {device['model']}")
-    if device.get("mac"):
-        print(f"  MAC: {device['mac']}")
+
+    # Auto-pair if not already paired
+    if not device.get("client_key") and not args.no_enrich:
+        print()
+        _do_pair(ip, cfg)
+    elif device.get("client_key") and not device.get("mac") and not device.get("wifi_mac"):
+        # Already paired but missing MACs — fetch them
+        print("Fetching MAC addresses...")
+        macs = _fetch_macs_via_ws(ip, device["client_key"])
+        if macs:
+            device.update(macs)
+            _save_config(cfg)
+            for k, v in macs.items():
+                label = "MAC (wired)" if k == "mac" else "MAC (wifi)"
+                print(f"  {label}: {v}")
 
 
 def cmd_remove(args):
@@ -794,77 +920,8 @@ def cmd_pair(args):
     if ip not in cfg["devices"]:
         cfg["devices"][ip] = {"ip": ip, "name": ip}
 
-    name = cfg["devices"][ip].get("name", ip)
-    print(f"Connecting to {name} ({ip})...")
-    ws = WebSocket.connect(f"wss://{ip}:3001", timeout=10)
-
-    # Send PIN-based registration request (uppercase "PIN" as the TV expects)
-    reg_msg = {
-        "type": "register",
-        "id": str(uuid.uuid4()),
-        "payload": {
-            **REGISTRATION_PAYLOAD,
-            "pairingType": "PIN",
-            "forcePairing": False,
-        },
-    }
-    ws.send(json.dumps(reg_msg))
-
-    # Wait for TV to show PIN on screen
-    pin_requested = False
-    start = time.monotonic()
-    while time.monotonic() - start < 60:
-        try:
-            raw = ws.recv(timeout=30)
-        except (socket.timeout, TimeoutError):
-            break
-        except ConnectionError:
-            break
-
-        resp = json.loads(raw)
-        resp_type = resp.get("type", "")
-        payload = resp.get("payload", {})
-
-        # Registration successful (PIN verified)
-        if resp_type == "registered" or "client-key" in payload:
-            key = payload.get("client-key")
-            if key:
-                cfg["devices"][ip]["client_key"] = key
-                _save_config(cfg)
-                print("Paired successfully! Client key saved.")
-                ws.close()
-
-                # Fetch real MAC addresses now that we're paired
-                print("Fetching MAC addresses...")
-                macs = _fetch_macs_via_ws(ip, key)
-                if macs:
-                    cfg["devices"][ip].update(macs)
-                    _save_config(cfg)
-                    for k, v in macs.items():
-                        label = "MAC (wired)" if k == "mac" else "MAC (wifi)"
-                        print(f"  {label}: {v}")
-                return
-
-        # TV is displaying a PIN — ask user to enter it
-        elif payload.get("pairingType") in ("PIN", "pin") and not pin_requested:
-            pin = input("Enter the PIN shown on your TV: ").strip()
-            pin_msg = {
-                "type": "request",
-                "id": str(uuid.uuid4()),
-                "uri": "ssap://pairing/setPin",
-                "payload": {"pin": pin},
-            }
-            ws.send(json.dumps(pin_msg))
-            pin_requested = True
-
-        elif resp_type == "error":
-            print(f"Pairing failed: {resp.get('error', 'Unknown error')}", file=sys.stderr)
-            ws.close()
-            sys.exit(1)
-
-    print("Pairing timed out.", file=sys.stderr)
-    ws.close()
-    sys.exit(1)
+    if not _do_pair(ip, cfg):
+        sys.exit(1)
 
 
 def _connect_and_send(ip: str, cfg: dict, uri: str, payload: Optional[dict] = None,
