@@ -6,55 +6,29 @@ Communicates via WebSocket using the SSAP (Simple Service Access Protocol) on po
 
 ## Installation
 
-### Prerequisites
-
-Python 3.9+ is required.
-
-**macOS (Homebrew):**
-```bash
-brew install python3 pipx
-```
-
-**Linux (Debian/Ubuntu):**
-```bash
-sudo apt install python3 python3-pip python3-venv pipx
-```
-
-**Linux (Fedora/RHEL):**
-```bash
-sudo dnf install python3 python3-pip pipx
-```
-
-**Windows:**
-```bash
-# Python from python.org includes pip. Or via winget:
-winget install Python.Python.3
-```
-
-### Install lgtvremote-cli
-
-The recommended way on macOS is with `pipx`, which manages a virtual environment for you:
+Zero dependencies — only Python 3.9+ is required (ships with macOS and most Linux distros).
 
 ```bash
-pipx install .
+# Clone the repo
+git clone https://github.com/griches/lgtvremote-cli.git
+cd lgtvremote-cli
+
+# Option 1: Add a shell alias (recommended)
+echo 'alias lgtv="python3 '$(pwd)'/lgtvremote_cli.py"' >> ~/.zshrc
+source ~/.zshrc
+
+# Option 2: Symlink into your PATH
+ln -s $(pwd)/lgtvremote_cli.py /usr/local/bin/lgtv
 ```
 
-Alternatively, use a virtual environment:
+If you don't have Python 3 installed:
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate   # On Windows: .venv\Scripts\activate
-pip install .
-```
-
-Or run directly without installing (just install the dependency):
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install websockets
-python3 lgtvremote_cli.py <command>
-```
+| Platform | Install |
+|----------|---------|
+| macOS | `brew install python3` |
+| Ubuntu/Debian | `sudo apt install python3` |
+| Fedora/RHEL | `sudo dnf install python3` |
+| Windows | `winget install Python.Python.3` or [python.org](https://www.python.org/downloads/) |
 
 ## Quick Start
 

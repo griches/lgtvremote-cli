@@ -4,13 +4,17 @@ lgtvremote-cli — Command-line interface for controlling LG webOS TVs.
 
 Communicates over WebSocket (SSAP protocol) on port 3001.
 Supports discovery, pairing, remote control, app launching, and Wake-on-LAN.
+
+Zero dependencies — uses only the Python standard library.
 """
 
 import argparse
-import asyncio
+import hashlib
+import base64
 import json
 import os
 import pathlib
+import random
 import socket
 import struct
 import ssl
@@ -20,12 +24,206 @@ import time
 import uuid
 from typing import Any, Optional
 
-try:
-    import websockets
-    import websockets.asyncio.client
-except ImportError:
-    print("Error: 'websockets' package is required. Install with: pip install websockets>=12.0", file=sys.stderr)
-    sys.exit(1)
+# ---------------------------------------------------------------------------
+# Minimal WebSocket client (RFC 6455) — no external dependencies
+# ---------------------------------------------------------------------------
+
+class WebSocket:
+    """Minimal WebSocket client using only the standard library."""
+
+    def __init__(self, sock: socket.socket):
+        self._sock = sock
+        self._closed = False
+
+    @classmethod
+    def connect(cls, url: str, timeout: float = 10.0) -> "WebSocket":
+        """Connect to a WebSocket URL (ws:// or wss://)."""
+        if url.startswith("wss://"):
+            scheme, default_port, use_ssl = "wss", 3001, True
+            rest = url[6:]
+        elif url.startswith("ws://"):
+            scheme, default_port, use_ssl = "ws", 80, False
+            rest = url[5:]
+        else:
+            raise ValueError(f"Unsupported URL scheme: {url}")
+
+        # Parse host:port/path
+        if "/" in rest:
+            host_port, path = rest.split("/", 1)
+            path = "/" + path
+        else:
+            host_port = rest
+            path = "/"
+
+        if ":" in host_port:
+            host, port_str = host_port.rsplit(":", 1)
+            port = int(port_str)
+        else:
+            host, port = host_port, default_port
+
+        # Create TCP socket
+        raw_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        raw_sock.settimeout(timeout)
+        raw_sock.connect((host, port))
+
+        if use_ssl:
+            ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            ssl_ctx.check_hostname = False
+            ssl_ctx.verify_mode = ssl.CERT_NONE
+            sock = ssl_ctx.wrap_socket(raw_sock, server_hostname=host)
+        else:
+            sock = raw_sock
+
+        # WebSocket handshake
+        ws_key = base64.b64encode(random.randbytes(16)).decode()
+        handshake = (
+            f"GET {path} HTTP/1.1\r\n"
+            f"Host: {host}:{port}\r\n"
+            f"Upgrade: websocket\r\n"
+            f"Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {ws_key}\r\n"
+            f"Sec-WebSocket-Version: 13\r\n"
+            f"\r\n"
+        )
+        sock.sendall(handshake.encode())
+
+        # Read response headers
+        response = b""
+        while b"\r\n\r\n" not in response:
+            chunk = sock.recv(4096)
+            if not chunk:
+                raise ConnectionError("Connection closed during handshake")
+            response += chunk
+
+        status_line = response.split(b"\r\n")[0].decode()
+        if "101" not in status_line:
+            raise ConnectionError(f"WebSocket handshake failed: {status_line}")
+
+        ws = cls(sock)
+
+        # If there's leftover data after headers, buffer it
+        header_end = response.index(b"\r\n\r\n") + 4
+        ws._recv_buffer = response[header_end:]
+
+        return ws
+
+    def send(self, message: str):
+        """Send a text message."""
+        if self._closed:
+            raise ConnectionError("WebSocket is closed")
+        self._send_frame(0x1, message.encode())
+
+    def recv(self, timeout: Optional[float] = None) -> str:
+        """Receive a text message. Returns the decoded string."""
+        if self._closed:
+            raise ConnectionError("WebSocket is closed")
+
+        old_timeout = self._sock.gettimeout()
+        if timeout is not None:
+            self._sock.settimeout(timeout)
+        try:
+            opcode, data = self._recv_frame()
+        finally:
+            self._sock.settimeout(old_timeout)
+
+        if opcode == 0x1:  # Text
+            return data.decode()
+        elif opcode == 0x2:  # Binary
+            return data.decode()
+        elif opcode == 0x8:  # Close
+            self._closed = True
+            raise ConnectionError("WebSocket closed by server")
+        elif opcode == 0x9:  # Ping
+            self._send_frame(0xA, data)  # Pong
+            return self.recv(timeout)
+        elif opcode == 0xA:  # Pong
+            return self.recv(timeout)
+        else:
+            return data.decode()
+
+    def close(self):
+        """Close the WebSocket connection."""
+        if not self._closed:
+            try:
+                self._send_frame(0x8, b"")
+            except OSError:
+                pass
+            self._closed = True
+            try:
+                self._sock.close()
+            except OSError:
+                pass
+
+    def _send_frame(self, opcode: int, data: bytes):
+        """Send a WebSocket frame (always masked, as required for clients)."""
+        frame = bytearray()
+        frame.append(0x80 | opcode)  # FIN + opcode
+
+        length = len(data)
+        if length < 126:
+            frame.append(0x80 | length)  # Mask bit + length
+        elif length < 65536:
+            frame.append(0x80 | 126)
+            frame.extend(struct.pack("!H", length))
+        else:
+            frame.append(0x80 | 127)
+            frame.extend(struct.pack("!Q", length))
+
+        # Masking key
+        mask = random.randbytes(4)
+        frame.extend(mask)
+
+        # Masked payload
+        masked = bytearray(length)
+        for i in range(length):
+            masked[i] = data[i] ^ mask[i % 4]
+        frame.extend(masked)
+
+        self._sock.sendall(bytes(frame))
+
+    def _read_bytes(self, n: int) -> bytes:
+        """Read exactly n bytes from socket, using any buffered data first."""
+        result = bytearray()
+
+        # Use buffered data first
+        if hasattr(self, "_recv_buffer") and self._recv_buffer:
+            take = min(n, len(self._recv_buffer))
+            result.extend(self._recv_buffer[:take])
+            self._recv_buffer = self._recv_buffer[take:]
+            n -= take
+
+        while n > 0:
+            chunk = self._sock.recv(min(n, 65536))
+            if not chunk:
+                raise ConnectionError("Connection closed")
+            result.extend(chunk)
+            n -= len(chunk)
+
+        return bytes(result)
+
+    def _recv_frame(self) -> tuple:
+        """Receive a WebSocket frame. Returns (opcode, payload_data)."""
+        header = self._read_bytes(2)
+        opcode = header[0] & 0x0F
+        masked = bool(header[1] & 0x80)
+        length = header[1] & 0x7F
+
+        if length == 126:
+            length = struct.unpack("!H", self._read_bytes(2))[0]
+        elif length == 127:
+            length = struct.unpack("!Q", self._read_bytes(8))[0]
+
+        if masked:
+            mask = self._read_bytes(4)
+            data = bytearray(self._read_bytes(length))
+            for i in range(length):
+                data[i] ^= mask[i % 4]
+            data = bytes(data)
+        else:
+            data = self._read_bytes(length)
+
+        return opcode, data
+
 
 # ---------------------------------------------------------------------------
 # Config persistence
@@ -53,7 +251,6 @@ def _get_device(cfg: dict, ip: Optional[str]) -> Optional[dict]:
         return cfg["devices"].get(ip)
     if cfg.get("default"):
         return cfg["devices"].get(cfg["default"])
-    # Single device shortcut
     if len(cfg["devices"]) == 1:
         return next(iter(cfg["devices"].values()))
     return None
@@ -119,17 +316,10 @@ REGISTRATION_PAYLOAD = {
 }
 
 
-async def _ws_connect(ip: str, client_key: Optional[str] = None, timeout: float = 10.0) -> tuple:
+def _ws_connect(ip: str, client_key: Optional[str] = None, timeout: float = 10.0) -> tuple:
     """Connect and register with the TV. Returns (websocket, client_key)."""
-    ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    ssl_ctx.check_hostname = False
-    ssl_ctx.verify_mode = ssl.CERT_NONE
-
     uri = f"wss://{ip}:3001"
-    ws = await asyncio.wait_for(
-        websockets.asyncio.client.connect(uri, ssl=ssl_ctx, additional_headers={}),
-        timeout=timeout,
-    )
+    ws = WebSocket.connect(uri, timeout=timeout)
 
     # Register
     reg = dict(REGISTRATION_PAYLOAD)
@@ -145,7 +335,7 @@ async def _ws_connect(ip: str, client_key: Optional[str] = None, timeout: float 
         "payload": {**reg, "pairingType": pairing_type},
     }
 
-    await ws.send(json.dumps(reg_msg))
+    ws.send(json.dumps(reg_msg))
 
     # Wait for registration response
     new_key = client_key
@@ -154,8 +344,10 @@ async def _ws_connect(ip: str, client_key: Optional[str] = None, timeout: float 
 
     while time.monotonic() - start < timeout:
         try:
-            raw = await asyncio.wait_for(ws.recv(), timeout=max(1, timeout - (time.monotonic() - start)))
-        except asyncio.TimeoutError:
+            raw = ws.recv(timeout=max(1, timeout - (time.monotonic() - start)))
+        except (socket.timeout, TimeoutError):
+            break
+        except ConnectionError:
             break
 
         resp = json.loads(raw)
@@ -173,7 +365,6 @@ async def _ws_connect(ip: str, client_key: Optional[str] = None, timeout: float 
         elif resp_type == "error":
             error_msg = resp.get("error", "Unknown error")
             raise ConnectionError(f"Registration failed: {error_msg}")
-        # Pairing prompt shown on TV — for PIN flow, handle separately
         elif "pairingType" in payload and payload.get("pairingType") == "pin":
             if not client_key:
                 raise ConnectionError("NEEDS_PIN")
@@ -184,7 +375,7 @@ async def _ws_connect(ip: str, client_key: Optional[str] = None, timeout: float 
     return ws, new_key
 
 
-async def _send_request(ws, uri: str, payload: Optional[dict] = None, subscribe: bool = False) -> dict:
+def _send_request(ws: WebSocket, uri: str, payload: Optional[dict] = None, subscribe: bool = False) -> dict:
     """Send an SSAP request and return the response payload."""
     msg_id = str(uuid.uuid4())
     msg = {
@@ -195,14 +386,16 @@ async def _send_request(ws, uri: str, payload: Optional[dict] = None, subscribe:
     if payload:
         msg["payload"] = payload
 
-    await ws.send(json.dumps(msg))
+    ws.send(json.dumps(msg))
 
     # Wait for matching response
     start = time.monotonic()
     while time.monotonic() - start < 10:
         try:
-            raw = await asyncio.wait_for(ws.recv(), timeout=5)
-        except asyncio.TimeoutError:
+            raw = ws.recv(timeout=5)
+        except (socket.timeout, TimeoutError):
+            break
+        except ConnectionError:
             break
         resp = json.loads(raw)
         if resp.get("id") == msg_id:
@@ -210,7 +403,7 @@ async def _send_request(ws, uri: str, payload: Optional[dict] = None, subscribe:
     return {}
 
 
-async def _send_button(ws, uri: str, payload: Optional[dict] = None):
+def _send_button(ws: WebSocket, uri: str, payload: Optional[dict] = None):
     """Send a button press (fire-and-forget)."""
     msg = {
         "type": "request",
@@ -219,7 +412,7 @@ async def _send_button(ws, uri: str, payload: Optional[dict] = None):
     }
     if payload:
         msg["payload"] = payload
-    await ws.send(json.dumps(msg))
+    ws.send(json.dumps(msg))
 
 
 # ---------------------------------------------------------------------------
@@ -274,7 +467,6 @@ def _ssdp_discover(timeout: float = 5.0) -> list[dict]:
     s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
     s.settimeout(2.0)
 
-    # Try to set multicast interface
     try:
         s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, struct.pack("b", 4))
     except OSError:
@@ -307,7 +499,6 @@ def _ssdp_discover(timeout: float = 5.0) -> list[dict]:
                 if "lge" not in response.lower() and search_target not in response:
                     continue
 
-                # Parse headers
                 name = ip
                 for line in response.split("\r\n"):
                     lower = line.lower()
@@ -394,7 +585,6 @@ def cmd_scan(args):
         print(f"  {d['name']}")
         print(f"    IP: {d['ip']}")
 
-        # Enrich
         info = _enrich_device(d["ip"])
         if info.get("model"):
             print(f"    Model: {info['model']}")
@@ -421,7 +611,6 @@ def cmd_add(args):
     if args.wifi_mac:
         device["wifi_mac"] = _format_mac(args.wifi_mac)
 
-    # Try to enrich
     if not args.no_enrich:
         print(f"Fetching device info from {ip}...")
         info = _enrich_device(ip)
@@ -501,80 +690,69 @@ def cmd_pair(args):
         print("Error: No TV specified and no default set. Use --tv <ip> or 'lgtv set-default <ip>'.", file=sys.stderr)
         sys.exit(1)
 
-    # Ensure device is saved
     if ip not in cfg["devices"]:
         cfg["devices"][ip] = {"ip": ip, "name": ip}
 
-    async def do_pair():
-        ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        ssl_ctx.check_hostname = False
-        ssl_ctx.verify_mode = ssl.CERT_NONE
+    print(f"Connecting to {ip}...")
+    ws = WebSocket.connect(f"wss://{ip}:3001", timeout=10)
 
-        uri = f"wss://{ip}:3001"
-        print(f"Connecting to {ip}...")
+    # Send PIN registration request
+    reg_msg = {
+        "type": "register",
+        "id": str(uuid.uuid4()),
+        "payload": {**REGISTRATION_PAYLOAD, "pairingType": "pin"},
+    }
+    ws.send(json.dumps(reg_msg))
 
-        ws = await asyncio.wait_for(
-            websockets.asyncio.client.connect(uri, ssl=ssl_ctx),
-            timeout=10,
-        )
+    print("A PIN should appear on your TV screen.")
+    pin = input("Enter the PIN shown on TV: ").strip()
 
-        # Send PIN registration request
-        reg_msg = {
-            "type": "register",
-            "id": str(uuid.uuid4()),
-            "payload": {**REGISTRATION_PAYLOAD, "pairingType": "pin"},
-        }
-        await ws.send(json.dumps(reg_msg))
+    # Send PIN
+    pin_msg = {
+        "type": "request",
+        "id": str(uuid.uuid4()),
+        "uri": "ssap://pairing/setPin",
+        "payload": {"pin": pin},
+    }
+    ws.send(json.dumps(pin_msg))
 
-        print("A PIN should appear on your TV screen.")
-        pin = input("Enter the PIN shown on TV: ").strip()
+    # Wait for registration
+    start = time.monotonic()
+    while time.monotonic() - start < 15:
+        try:
+            raw = ws.recv(timeout=10)
+        except (socket.timeout, TimeoutError):
+            break
+        except ConnectionError:
+            break
+        resp = json.loads(raw)
+        payload = resp.get("payload", {})
+        if resp.get("type") == "registered" or "client-key" in payload:
+            key = payload.get("client-key")
+            if key:
+                cfg["devices"][ip]["client_key"] = key
+                _save_config(cfg)
+                print(f"Paired successfully! Client key saved.")
+                ws.close()
+                return
+        elif resp.get("type") == "error":
+            print(f"Pairing failed: {resp.get('error', 'Unknown error')}", file=sys.stderr)
+            ws.close()
+            sys.exit(1)
 
-        # Send PIN
-        pin_msg = {
-            "type": "request",
-            "id": str(uuid.uuid4()),
-            "uri": "ssap://pairing/setPin",
-            "payload": {"pin": pin},
-        }
-        await ws.send(json.dumps(pin_msg))
-
-        # Wait for registration
-        start = time.monotonic()
-        while time.monotonic() - start < 15:
-            try:
-                raw = await asyncio.wait_for(ws.recv(), timeout=10)
-            except asyncio.TimeoutError:
-                break
-            resp = json.loads(raw)
-            payload = resp.get("payload", {})
-            if resp.get("type") == "registered" or "client-key" in payload:
-                key = payload.get("client-key")
-                if key:
-                    cfg["devices"][ip]["client_key"] = key
-                    _save_config(cfg)
-                    print(f"Paired successfully! Client key saved.")
-                    await ws.close()
-                    return
-            elif resp.get("type") == "error":
-                print(f"Pairing failed: {resp.get('error', 'Unknown error')}", file=sys.stderr)
-                await ws.close()
-                sys.exit(1)
-
-        print("Pairing timed out.", file=sys.stderr)
-        await ws.close()
-        sys.exit(1)
-
-    asyncio.run(do_pair())
+    print("Pairing timed out.", file=sys.stderr)
+    ws.close()
+    sys.exit(1)
 
 
-async def _connect_and_send(ip: str, cfg: dict, uri: str, payload: Optional[dict] = None,
-                             subscribe: bool = False, wait_response: bool = True) -> Optional[dict]:
+def _connect_and_send(ip: str, cfg: dict, uri: str, payload: Optional[dict] = None,
+                       subscribe: bool = False, wait_response: bool = True) -> Optional[dict]:
     """Connect, authenticate, send a command, return response."""
     device = cfg["devices"].get(ip, {})
     client_key = device.get("client_key")
 
     try:
-        ws, new_key = await _ws_connect(ip, client_key)
+        ws, new_key = _ws_connect(ip, client_key)
     except ConnectionError as e:
         if "NEEDS_PIN" in str(e):
             print("Error: TV requires pairing. Run 'lgtv pair' first.", file=sys.stderr)
@@ -589,12 +767,12 @@ async def _connect_and_send(ip: str, cfg: dict, uri: str, payload: Optional[dict
         _save_config(cfg)
 
     if wait_response:
-        result = await _send_request(ws, uri, payload, subscribe=subscribe)
+        result = _send_request(ws, uri, payload, subscribe=subscribe)
     else:
-        await _send_button(ws, uri, payload)
+        _send_button(ws, uri, payload)
         result = None
 
-    await ws.close()
+    ws.close()
     return result
 
 
@@ -608,11 +786,11 @@ def _run_command(args, uri: str, payload: Optional[dict] = None,
         sys.exit(1)
 
     try:
-        return asyncio.run(_connect_and_send(ip, cfg, uri, payload, subscribe=subscribe, wait_response=wait_response))
+        return _connect_and_send(ip, cfg, uri, payload, subscribe=subscribe, wait_response=wait_response)
     except ConnectionError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
-    except (OSError, asyncio.TimeoutError) as e:
+    except (OSError, TimeoutError) as e:
         print(f"Error: Could not connect to TV at {ip}: {e}", file=sys.stderr)
         sys.exit(1)
 
@@ -656,12 +834,10 @@ def cmd_power(args):
         print("Error: No TV specified and no default set.", file=sys.stderr)
         sys.exit(1)
 
-    # Try to connect — if it works, TV is on, so turn it off
     try:
-        asyncio.run(_connect_and_send(ip, cfg, "ssap://system/turnOff", wait_response=False))
+        _connect_and_send(ip, cfg, "ssap://system/turnOff", wait_response=False)
         print("TV powered off.")
-    except (ConnectionError, OSError, asyncio.TimeoutError):
-        # TV is off or unreachable — try WOL
+    except (ConnectionError, OSError, TimeoutError):
         device = cfg["devices"].get(ip, {})
         macs = [m for m in [device.get("mac"), device.get("wifi_mac")] if m]
         if macs:
@@ -720,17 +896,16 @@ def cmd_nav(args):
         print(f"Error: Unknown button '{button}'. Valid: {', '.join(sorted(key_map))}", file=sys.stderr)
         sys.exit(1)
 
-    # Navigation keys are sent via the pointer socket as key events
     cfg = _load_config()
     ip = _get_device_ip(cfg, args.tv)
     if not ip:
         print("Error: No TV specified and no default set.", file=sys.stderr)
         sys.exit(1)
 
-    async def do_nav():
+    try:
         device = cfg["devices"].get(ip, {})
         client_key = device.get("client_key")
-        ws, new_key = await _ws_connect(ip, client_key)
+        ws, new_key = _ws_connect(ip, client_key)
 
         if new_key and new_key != client_key:
             if ip not in cfg["devices"]:
@@ -739,36 +914,34 @@ def cmd_nav(args):
             _save_config(cfg)
 
         # Get pointer input socket
-        result = await _send_request(ws, "ssap://com.webos.service.networkinput/getPointerInputSocket")
+        result = _send_request(ws, "ssap://com.webos.service.networkinput/getPointerInputSocket")
         sock_path = result.get("socketPath")
         if not sock_path:
-            # Fallback: send as SSAP command for basic nav
+            # Fallback for basic nav
             fallback_uris = {
                 "ENTER": "ssap://com.webos.service.ime/sendEnterKey",
                 "BACK": "ssap://com.webos.service.ime/deleteCharacters",
             }
             if key in fallback_uris:
-                await _send_button(ws, fallback_uris[key])
-            await ws.close()
+                _send_button(ws, fallback_uris[key])
+            ws.close()
+            print(f"Sent: {button}")
             return
 
         # Connect to pointer socket
-        ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        ssl_ctx.check_hostname = False
-        ssl_ctx.verify_mode = ssl.CERT_NONE
-
-        pointer_ws = await websockets.asyncio.client.connect(sock_path, ssl=ssl_ctx)
-
-        await pointer_ws.send(f"type:button\nname:{key}\n\n")
-        await asyncio.sleep(0.1)
-
-        await pointer_ws.close()
-        await ws.close()
-
-    try:
-        asyncio.run(do_nav())
+        pointer_ws = WebSocket.connect(sock_path, timeout=5)
+        pointer_ws.send(f"type:button\nname:{key}\n\n")
+        time.sleep(0.1)
+        pointer_ws.close()
+        ws.close()
         print(f"Sent: {button}")
-    except (ConnectionError, OSError, asyncio.TimeoutError) as e:
+    except ConnectionError as e:
+        if "NEEDS_PIN" in str(e):
+            print("Error: TV requires pairing. Run 'lgtv pair' first.", file=sys.stderr)
+        else:
+            print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except (OSError, TimeoutError) as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
@@ -821,7 +994,6 @@ def cmd_skip_back(args):
 def cmd_input(args):
     """Switch TV input."""
     input_id = args.input.upper()
-    # Accept shorthand like "1" → "HDMI_1"
     if input_id.isdigit():
         input_id = f"HDMI_{input_id}"
     elif not input_id.startswith("HDMI_") and not input_id.startswith("COMP_"):
@@ -840,7 +1012,6 @@ def cmd_inputs(args):
             label = d.get("label", d.get("id", "?"))
             input_id = d.get("id", "?")
             connected = d.get("connected", False)
-            icon = d.get("icon", "")
             status = " [connected]" if connected else ""
             print(f"  {input_id}: {label}{status}")
     else:
@@ -878,11 +1049,9 @@ KNOWN_APPS = {
 def cmd_launch(args):
     """Launch an app on the TV."""
     app = args.app
-    # Resolve friendly name
     app_id = KNOWN_APPS.get(app.lower(), app)
     payload: dict[str, Any] = {"id": app_id}
 
-    # Handle params like key=value
     if args.params:
         params = {}
         for p in args.params:
@@ -979,32 +1148,25 @@ def cmd_number(args):
         print("Error: Digit must be 0-9.", file=sys.stderr)
         sys.exit(1)
 
-    async def do_number():
+    try:
         device = cfg["devices"].get(ip, {})
-        ws, new_key = await _ws_connect(ip, device.get("client_key"))
+        ws, new_key = _ws_connect(ip, device.get("client_key"))
 
         if new_key and new_key != device.get("client_key"):
             cfg["devices"].setdefault(ip, {"ip": ip, "name": ip})["client_key"] = new_key
             _save_config(cfg)
 
-        result = await _send_request(ws, "ssap://com.webos.service.networkinput/getPointerInputSocket")
+        result = _send_request(ws, "ssap://com.webos.service.networkinput/getPointerInputSocket")
         sock_path = result.get("socketPath")
         if sock_path:
-            ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-            ssl_ctx.check_hostname = False
-            ssl_ctx.verify_mode = ssl.CERT_NONE
-            pointer_ws = await websockets.asyncio.client.connect(sock_path, ssl=ssl_ctx)
-            key_name = f"{num}"
-            await pointer_ws.send(f"type:button\nname:{key_name}\n\n")
-            await asyncio.sleep(0.1)
-            await pointer_ws.close()
+            pointer_ws = WebSocket.connect(sock_path, timeout=5)
+            pointer_ws.send(f"type:button\nname:{num}\n\n")
+            time.sleep(0.1)
+            pointer_ws.close()
 
-        await ws.close()
-
-    try:
-        asyncio.run(do_number())
+        ws.close()
         print(f"Sent number: {num}")
-    except (ConnectionError, OSError, asyncio.TimeoutError) as e:
+    except (ConnectionError, OSError, TimeoutError) as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 

@@ -21,9 +21,7 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Topic :: Home Automation",
 ]
-dependencies = [
-    "websockets>=12.0",
-]
+dependencies = []
 
 [project.scripts]
 lgtv = "lgtvremote_cli:main"
