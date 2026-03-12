@@ -1399,6 +1399,7 @@ def cmd_service(args):
     _, payload = menus[menu]
     _run_command(args, "ssap://system.launcher/launch", payload)
     print(f"Opened service menu: {menu}")
+    print(f"Default password: 0413 (alternatives: 0000, 7777)")
 
 
 # --- Enrich ---
@@ -1588,7 +1589,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_num.add_argument("digit", type=int, help="Digit 0-9")
 
     # Service menus
-    p_svc = sub.add_parser("service", help="Open service/advanced menu")
+    p_svc = sub.add_parser("service", help="Open service/advanced menu (default password: 0413)")
     p_svc.add_argument("menu", help="Menu: instart, ezadjust, hotel, hidden, freesync")
 
     # Raw command
