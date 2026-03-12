@@ -1,6 +1,6 @@
-# lgtvremote-cli
+# 📺 lgtvremote-cli
 
-Command-line interface for controlling LG webOS TVs over your local network.
+> Command-line interface for controlling LG webOS TVs over your local network.
 
 Communicates via WebSocket using the SSAP (Simple Service Access Protocol) on port 3001. Supports TV discovery, PIN-based pairing, remote control, app launching, input switching, Wake-on-LAN, and more.
 
@@ -173,6 +173,19 @@ Launch any app by its display name — matches against what's installed on your 
 | Command | Description |
 |---------|-------------|
 | `lgtv number <0-9>` | Send a number key press |
+
+### Display & Settings (newer TVs only)
+
+These commands use `setSystemSettings` which may not be available on older webOS versions.
+
+| Command | Description |
+|---------|-------------|
+| `lgtv screen-off` | Turn off screen (audio continues) |
+| `lgtv screen-on` | Turn screen back on |
+| `lgtv picture-mode <mode>` | Set picture mode (e.g., standard, vivid, cinema, game) |
+| `lgtv sound-mode <mode>` | Set sound mode (e.g., standard, cinema, game) |
+| `lgtv subtitles` | Toggle subtitles |
+| `lgtv audio-track` | Cycle audio track |
 
 ### Service Menus (Advanced)
 

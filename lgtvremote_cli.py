@@ -1301,6 +1301,45 @@ def cmd_app(args):
         print("Could not get foreground app info.")
 
 
+# --- Display/Settings (newer TVs only) ---
+_SETTINGS_NOTE = "(may not work on older TVs)"
+
+
+def cmd_screen_off(args):
+    _run_command(args, "ssap://com.webos.service.settings/setSystemSettings",
+                 {"category": "display", "settings": {"screenOff": True}})
+    print(f"Screen off. {_SETTINGS_NOTE}")
+
+
+def cmd_picture_mode(args):
+    _run_command(args, "ssap://com.webos.service.settings/setSystemSettings",
+                 {"category": "picture", "settings": {"pictureMode": args.mode}})
+    print(f"Picture mode set to: {args.mode} {_SETTINGS_NOTE}")
+
+
+def cmd_sound_mode(args):
+    _run_command(args, "ssap://com.webos.service.settings/setSystemSettings",
+                 {"category": "sound", "settings": {"soundMode": args.mode}})
+    print(f"Sound mode set to: {args.mode} {_SETTINGS_NOTE}")
+
+
+def cmd_subtitles(args):
+    _run_command(args, "ssap://com.webos.service.settings/setSystemSettings",
+                 {"category": "caption", "settings": {"state": "toggle"}})
+    print(f"Toggled subtitles. {_SETTINGS_NOTE}")
+
+
+def cmd_audio_track(args):
+    _run_command(args, "ssap://media.controls/changeAudioTrack")
+    print(f"Cycled audio track. {_SETTINGS_NOTE}")
+
+
+def cmd_screen_on(args):
+    _run_command(args, "ssap://com.webos.service.settings/setSystemSettings",
+                 {"category": "display", "settings": {"screenOff": False}})
+    print(f"Screen on. {_SETTINGS_NOTE}")
+
+
 
 # --- Number key ---
 def cmd_number(args):
@@ -1533,6 +1572,20 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("apps", help="List installed apps")
     sub.add_parser("app", help="Show currently running app")
 
+    # Display/Settings (newer TVs only)
+    _newer = " (newer TVs only)"
+    sub.add_parser("screen-off", help="Turn off screen, audio continues" + _newer)
+    sub.add_parser("screen-on", help="Turn screen back on" + _newer)
+
+    p_pic = sub.add_parser("picture-mode", help="Set picture mode" + _newer)
+    p_pic.add_argument("mode", help="Picture mode (e.g., standard, vivid, cinema, game)")
+
+    p_snd = sub.add_parser("sound-mode", help="Set sound mode" + _newer)
+    p_snd.add_argument("mode", help="Sound mode (e.g., standard, cinema, game)")
+
+    sub.add_parser("subtitles", help="Toggle subtitles" + _newer)
+    sub.add_parser("audio-track", help="Cycle audio track" + _newer)
+
     # Number key
     p_num = sub.add_parser("number", help="Send number key (0-9)")
     p_num.add_argument("digit", type=int, help="Digit 0-9")
@@ -1584,6 +1637,12 @@ def main():
         "service": cmd_service,
         "raw": cmd_raw,
         "nav": cmd_nav,
+        "screen-off": cmd_screen_off,
+        "screen-on": cmd_screen_on,
+        "picture-mode": cmd_picture_mode,
+        "sound-mode": cmd_sound_mode,
+        "subtitles": cmd_subtitles,
+        "audio-track": cmd_audio_track,
     }
 
     # Volume subcommands
