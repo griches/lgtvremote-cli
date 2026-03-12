@@ -564,17 +564,14 @@ def _enrich_device(ip: str, location: Optional[str] = None) -> dict:
                     if model2:
                         info["model"] = model2
 
-            # MAC from UDN (last 12 hex chars of the UUID)
-            udn_start = xml.find("<UDN>uuid:")
-            udn_end = xml.find("</UDN>")
-            if udn_start >= 0 and udn_end > udn_start:
-                udn = xml[udn_start + 10:udn_end].replace("-", "")
-                if len(udn) >= 12:
-                    last12 = udn[-12:]
-                    if all(c in "0123456789abcdefABCDEF" for c in last12):
-                        mac = ":".join(last12[i:i+2].upper() for i in range(0, 12, 2))
-                        if mac != "00:00:00:00:00:00":
-                            info["mac"] = mac
+            # bluetoothMac field (some TVs include this)
+            bt_start = xml.find("<bluetoothMac>")
+            bt_end = xml.find("</bluetoothMac>")
+            if bt_start >= 0 and bt_end > bt_start:
+                bt_mac = xml[bt_start + 14:bt_end].strip()
+                if bt_mac and bt_mac != "00:00:00:00:00:00":
+                    # Bluetooth MAC is often WiFi MAC + 1, not useful for WOL
+                    pass
     except Exception:
         pass
 
@@ -620,6 +617,56 @@ def _format_mac(mac: str) -> str:
     if len(clean) != 12:
         return mac
     return ":".join(clean[i:i+2] for i in range(0, 12, 2))
+
+
+def _fetch_macs_via_ws(ip: str, client_key: str) -> dict:
+    """Fetch real MAC addresses via WebSocket (most reliable method).
+
+    Tries multiple endpoints matching what the iOS app does:
+    1. ssap://com.webos.service.connectionmanager/getinfo
+    2. ssap://com.webos.service.connectionmanager/getStatus (older webOS)
+    """
+    macs: dict[str, str] = {}
+    try:
+        ws, _ = _ws_connect(ip, client_key, timeout=5)
+
+        endpoints = [
+            "ssap://com.webos.service.connectionmanager/getinfo",
+            "ssap://com.webos.service.connectionmanager/getStatus",
+        ]
+
+        for endpoint in endpoints:
+            if macs:
+                break
+            result = _send_request(ws, endpoint)
+            if not result:
+                continue
+
+            # Format 1: {"wiredInfo": {"macAddress": "..."}, "wifiInfo": {"macAddress": "..."}}
+            for section_key, mac_key in [("wiredInfo", "mac"), ("wifiInfo", "wifi_mac"),
+                                          ("wired", "mac"), ("wifi", "wifi_mac")]:
+                section = result.get(section_key, {})
+                if isinstance(section, dict):
+                    mac = section.get("macAddress", "")
+                    if mac and mac != "00:00:00:00:00:00":
+                        macs[mac_key] = _format_mac(mac)
+
+            # Format 2: flat {"macAddress": "...", "wifiMacAddress": "..."}
+            if "mac" not in macs:
+                for key in ("macAddress", "wiredMacAddress"):
+                    mac = result.get(key, "")
+                    if mac and mac != "00:00:00:00:00:00":
+                        macs["mac"] = _format_mac(mac)
+                        break
+            if "wifi_mac" not in macs:
+                mac = result.get("wifiMacAddress", "")
+                if mac and mac != "00:00:00:00:00:00":
+                    macs["wifi_mac"] = _format_mac(mac)
+
+        ws.close()
+    except (ConnectionError, OSError, TimeoutError):
+        pass
+    return macs
 
 
 # ---------------------------------------------------------------------------
@@ -786,6 +833,16 @@ def cmd_pair(args):
                 _save_config(cfg)
                 print("Paired successfully! Client key saved.")
                 ws.close()
+
+                # Fetch real MAC addresses now that we're paired
+                print("Fetching MAC addresses...")
+                macs = _fetch_macs_via_ws(ip, key)
+                if macs:
+                    cfg["devices"][ip].update(macs)
+                    _save_config(cfg)
+                    for k, v in macs.items():
+                        label = "MAC (wired)" if k == "mac" else "MAC (wifi)"
+                        print(f"  {label}: {v}")
                 return
 
         # TV is displaying a PIN — ask user to enter it
@@ -1274,24 +1331,42 @@ def cmd_enrich(args):
         sys.exit(1)
 
     print(f"Enriching device info for {ip}...")
-    info = _enrich_device(ip)
-
     device = cfg["devices"][ip]
+
+    # Try UPnP/HTTP enrichment for name and model
+    info = _enrich_device(ip)
+    if info.get("name"):
+        device["name"] = info["name"]
+        print(f"  Name: {info['name']}")
     if info.get("model"):
         device["model"] = info["model"]
         print(f"  Model: {info['model']}")
-    if info.get("mac"):
+
+    # Fetch real MAC addresses via WebSocket (most reliable)
+    client_key = device.get("client_key")
+    if client_key:
+        print("  Fetching MAC addresses via WebSocket...")
+        macs = _fetch_macs_via_ws(ip, client_key)
+        if macs:
+            device.update(macs)
+            for k, v in macs.items():
+                label = "MAC (wired)" if k == "mac" else "MAC (wifi)"
+                print(f"  {label}: {v}")
+        else:
+            print("  Could not fetch MACs via WebSocket.")
+    else:
+        print("  TV not paired — pair first to fetch MAC addresses.")
+
+    # Fall back to HTTP API MACs if WebSocket didn't find any
+    if "mac" not in device and info.get("mac"):
         device["mac"] = info["mac"]
         print(f"  MAC (wired): {info['mac']}")
-    if info.get("wifi_mac"):
+    if "wifi_mac" not in device and info.get("wifi_mac"):
         device["wifi_mac"] = info["wifi_mac"]
-        print(f"  MAC (wifi):  {info['wifi_mac']}")
+        print(f"  MAC (wifi): {info['wifi_mac']}")
 
-    if not info:
-        print("  No additional info found. Is the TV on?")
-    else:
-        _save_config(cfg)
-        print("Device info updated.")
+    _save_config(cfg)
+    print("Device info updated.")
 
 
 # --- Raw command ---
