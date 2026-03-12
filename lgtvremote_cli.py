@@ -1226,9 +1226,41 @@ KNOWN_APPS = {
 
 
 def cmd_launch(args):
-    """Launch an app on the TV."""
+    """Launch an app on the TV by name, shortcut, or app ID."""
     app = args.app
-    app_id = KNOWN_APPS.get(app.lower(), app)
+    app_id = KNOWN_APPS.get(app.lower())
+
+    if not app_id:
+        # Not a known shortcut — try matching against installed app names
+        cfg = _load_config()
+        ip = _get_device_ip(cfg, args.tv)
+        if ip:
+            result = _run_command(args, "ssap://com.webos.applicationManager/listApps", wait_response=True)
+            if result and "apps" in result:
+                app_lower = app.lower()
+                # Exact title match first
+                for a in result["apps"]:
+                    if a.get("title", "").lower() == app_lower:
+                        app_id = a["id"]
+                        break
+                # Substring match as fallback
+                if not app_id:
+                    matches = [a for a in result["apps"]
+                               if app_lower in a.get("title", "").lower()]
+                    if len(matches) == 1:
+                        app_id = matches[0]["id"]
+                    elif len(matches) > 1:
+                        print(f"Multiple apps match '{app}':\n")
+                        for m in matches:
+                            print(f"  {m.get('title', '?')}")
+                            print(f"    ID: {m['id']}")
+                        print(f"\nBe more specific, or use the app ID directly.")
+                        return
+
+        # Fall back to using the input as a raw app ID
+        if not app_id:
+            app_id = app
+
     payload: dict[str, Any] = {"id": app_id}
 
     if args.params:
