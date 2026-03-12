@@ -500,6 +500,7 @@ def _ssdp_discover(timeout: float = 5.0) -> list[dict]:
                     continue
 
                 name = ip
+                location = None
                 for line in response.split("\r\n"):
                     lower = line.lower()
                     if lower.startswith("dlnadevicename.lge.com:"):
@@ -509,8 +510,10 @@ def _ssdp_discover(timeout: float = 5.0) -> list[dict]:
                             name = unquote(raw_name)
                         except Exception:
                             name = raw_name
+                    elif lower.startswith("location:"):
+                        location = line.split(":", 1)[1].strip()
 
-                devices[ip] = {"ip": ip, "name": name}
+                devices[ip] = {"ip": ip, "name": name, "location": location}
             except socket.timeout:
                 break
             except OSError:
@@ -520,43 +523,94 @@ def _ssdp_discover(timeout: float = 5.0) -> list[dict]:
     return list(devices.values())
 
 
-def _enrich_device(ip: str) -> dict:
-    """Fetch model name and MAC addresses from the TV's HTTP API."""
+def _enrich_device(ip: str, location: Optional[str] = None) -> dict:
+    """Fetch model name and MAC addresses from the TV.
+
+    Tries the UPnP device description XML first (works on all webOS versions),
+    then falls back to the HTTP API on port 3000 (newer webOS only).
+    """
     import urllib.request
     info: dict[str, Any] = {}
 
-    # Model name
+    # 1. UPnP XML — available on all webOS versions via the Location URL
+    upnp_url = location or f"http://{ip}:1787/"
     try:
-        req = urllib.request.Request(
-            f"http://{ip}:3000/api/com.webos.service.tv.systemproperty/getSystemInfo",
-            data=b'{"keys":["modelName","firmwareVersion"]}',
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
+        req = urllib.request.Request(upnp_url)
         with urllib.request.urlopen(req, timeout=3) as resp:
-            data = json.loads(resp.read())
-            if "modelName" in data:
-                info["model"] = data["modelName"]
+            xml = resp.read().decode("utf-8", errors="replace")
+
+            # friendlyName
+            fn_start = xml.find("<friendlyName>")
+            fn_end = xml.find("</friendlyName>")
+            if fn_start >= 0 and fn_end > fn_start:
+                name = xml[fn_start + 14:fn_end].strip()
+                if name:
+                    info["name"] = name
+
+            # modelNumber (e.g. OLED55B9PLA)
+            mn_start = xml.find("<modelNumber>")
+            mn_end = xml.find("</modelNumber>")
+            if mn_start >= 0 and mn_end > mn_start:
+                model = xml[mn_start + 13:mn_end].strip()
+                if model:
+                    info["model"] = model
+
+            # Fallback: modelName (e.g. "LG Smart TV")
+            if "model" not in info:
+                mn2_start = xml.find("<modelName>")
+                mn2_end = xml.find("</modelName>")
+                if mn2_start >= 0 and mn2_end > mn2_start:
+                    model2 = xml[mn2_start + 11:mn2_end].strip()
+                    if model2:
+                        info["model"] = model2
+
+            # MAC from UDN (last 12 hex chars of the UUID)
+            udn_start = xml.find("<UDN>uuid:")
+            udn_end = xml.find("</UDN>")
+            if udn_start >= 0 and udn_end > udn_start:
+                udn = xml[udn_start + 10:udn_end].replace("-", "")
+                if len(udn) >= 12:
+                    last12 = udn[-12:]
+                    if all(c in "0123456789abcdefABCDEF" for c in last12):
+                        mac = ":".join(last12[i:i+2].upper() for i in range(0, 12, 2))
+                        if mac != "00:00:00:00:00:00":
+                            info["mac"] = mac
     except Exception:
         pass
 
-    # MAC addresses
-    try:
-        param = '{"category":"network","keys":["macAddress","wifiMacAddress"]}'
-        from urllib.parse import quote
-        url = f"http://{ip}:3000/system/lge/setting?reqParam={quote(param)}"
-        req = urllib.request.Request(url)
-        with urllib.request.urlopen(req, timeout=3) as resp:
-            data = json.loads(resp.read())
-            settings = data.get("settings", {})
-            mac = settings.get("macAddress", "")
-            wifi_mac = settings.get("wifiMacAddress", "")
-            if mac and mac != "00:00:00:00:00:00":
-                info["mac"] = _format_mac(mac)
-            if wifi_mac and wifi_mac != "00:00:00:00:00:00":
-                info["wifi_mac"] = _format_mac(wifi_mac)
-    except Exception:
-        pass
+    # 2. Port 3000 HTTP API — newer webOS (5.0+) only
+    if "model" not in info:
+        try:
+            req = urllib.request.Request(
+                f"http://{ip}:3000/api/com.webos.service.tv.systemproperty/getSystemInfo",
+                data=b'{"keys":["modelName","firmwareVersion"]}',
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                data = json.loads(resp.read())
+                if "modelName" in data:
+                    info["model"] = data["modelName"]
+        except Exception:
+            pass
+
+    if "mac" not in info:
+        try:
+            param = '{"category":"network","keys":["macAddress","wifiMacAddress"]}'
+            from urllib.parse import quote
+            url = f"http://{ip}:3000/system/lge/setting?reqParam={quote(param)}"
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                data = json.loads(resp.read())
+                settings = data.get("settings", {})
+                mac = settings.get("macAddress", "")
+                wifi_mac = settings.get("wifiMacAddress", "")
+                if mac and mac != "00:00:00:00:00:00":
+                    info["mac"] = _format_mac(mac)
+                if wifi_mac and wifi_mac != "00:00:00:00:00:00":
+                    info["wifi_mac"] = _format_mac(wifi_mac)
+        except Exception:
+            pass
 
     return info
 
@@ -582,16 +636,16 @@ def cmd_scan(args):
 
     print(f"\nFound {len(devices)} TV(s):\n")
     for d in devices:
-        print(f"  {d['name']}")
+        info = _enrich_device(d["ip"], location=d.get("location"))
+        name = info.get("name", d["name"])
+        print(f"  {name}")
         print(f"    IP: {d['ip']}")
-
-        info = _enrich_device(d["ip"])
         if info.get("model"):
             print(f"    Model: {info['model']}")
         if info.get("mac"):
-            print(f"    MAC (wired): {info['mac']}")
+            print(f"    MAC: {info['mac']}")
         if info.get("wifi_mac"):
-            print(f"    MAC (wifi):  {info['wifi_mac']}")
+            print(f"    MAC (wifi): {info['wifi_mac']}")
         print()
 
 
