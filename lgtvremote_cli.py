@@ -1492,7 +1492,7 @@ def build_parser() -> argparse.ArgumentParser:
               lgtv off                          # Turn off TV
               lgtv on                           # Wake TV via WOL
               lgtv volume set 25                # Set volume to 25
-              lgtv launch netflix               # Launch Netflix
+              lgtv launch Netflix               # Launch app by name
               lgtv input 1                      # Switch to HDMI 1
               lgtv nav ok                       # Press OK button
               lgtv play                         # Play media

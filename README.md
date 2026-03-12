@@ -33,20 +33,22 @@ If you don't have Python 3 installed:
 ## Quick Start
 
 ```bash
-# 1. Find TVs on your network
+# 1. Scan, add, and pair — all in one step
 lgtv scan
+# Finds TVs, adds them, asks to pair, fetches MAC addresses for Wake-on-LAN
 
-# 2. Add your TV
-lgtv add 192.168.1.100
+# 2. Control your TV
+lgtv off                    # Turn off
+lgtv on                     # Wake via Wake-on-LAN
+lgtv launch Netflix         # Launch apps by name
+lgtv volume set 20          # Set volume
+lgtv input 1                # Switch to HDMI 1
+```
 
-# 3. Pair (enter PIN shown on TV screen)
-lgtv pair
+Or if you know the IP:
 
-# 4. Control your TV
-lgtv off
-lgtv on
-lgtv launch netflix
-lgtv volume set 20
+```bash
+lgtv add 192.168.1.100      # Adds, pairs, and fetches MACs automatically
 ```
 
 ## Configuration
@@ -59,14 +61,14 @@ Device data is stored in `~/.config/lgtvremote/devices.json`. This includes IP a
 
 | Command | Description |
 |---------|-------------|
-| `lgtv scan` | Discover LG webOS TVs on the local network via SSDP |
-| `lgtv add <ip>` | Add a TV by IP address |
-| `lgtv add <ip> --name "Living Room" --mac AA:BB:CC:DD:EE:FF` | Add with name and MAC |
+| `lgtv scan` | Discover TVs, auto-add, pair, and fetch MAC addresses |
+| `lgtv add <ip>` | Add a TV by IP — auto-enriches, pairs, and fetches MACs |
+| `lgtv add <ip> --name "Living Room"` | Add with a custom name |
 | `lgtv remove <ip>` | Remove a saved TV |
 | `lgtv list` | List all saved TVs |
 | `lgtv set-default <ip>` | Set the default TV for commands |
-| `lgtv pair` | Pair with TV using PIN displayed on screen |
-| `lgtv enrich` | Fetch/update model name and MAC addresses from TV |
+| `lgtv pair` | Re-pair with a TV (if needed) |
+| `lgtv enrich` | Re-fetch model name and MAC addresses from TV |
 
 ### Power
 
@@ -131,19 +133,18 @@ Device data is stored in `~/.config/lgtvremote/devices.json`. This includes IP a
 
 ### Apps
 
+Launch any app by its display name — matches against what's installed on your TV:
+
 | Command | Description |
 |---------|-------------|
-| `lgtv launch netflix` | Launch Netflix |
-| `lgtv launch youtube` | Launch YouTube |
-| `lgtv launch disney+` | Launch Disney+ |
-| `lgtv launch amazon` | Launch Prime Video |
-| `lgtv launch hbo` | Launch HBO Max |
-| `lgtv launch spotify` | Launch Spotify |
-| `lgtv launch appletv` | Launch Apple TV+ |
-| `lgtv launch plex` | Launch Plex |
-| `lgtv launch browser` | Launch web browser |
-| `lgtv launch settings` | Open TV settings |
-| `lgtv launch <app-id>` | Launch any app by its webOS app ID |
+| `lgtv launch Netflix` | Launch Netflix |
+| `lgtv launch YouTube` | Launch YouTube |
+| `lgtv launch "Disney+"` | Launch Disney+ |
+| `lgtv launch "Prime Video"` | Launch Prime Video |
+| `lgtv launch Plex` | Launch Plex |
+| `lgtv launch browser` | Launch web browser (shortcut) |
+| `lgtv launch settings` | Open TV settings (shortcut) |
+| `lgtv launch <app-id>` | Launch by webOS app ID |
 | `lgtv apps` | List all installed apps with their IDs |
 | `lgtv app` | Show currently running foreground app |
 
