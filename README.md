@@ -6,20 +6,48 @@ Communicates via WebSocket using the SSAP (Simple Service Access Protocol) on po
 
 ## Installation
 
+### Prerequisites
+
+You need Python 3.9+ and pip. If you don't have pip installed:
+
+**macOS:**
+```bash
+python3 -m ensurepip --upgrade
+```
+
+**Linux (Debian/Ubuntu):**
+```bash
+sudo apt install python3-pip
+```
+
+**Linux (Fedora/RHEL):**
+```bash
+sudo dnf install python3-pip
+```
+
+**Windows:**
+```bash
+py -m ensurepip --upgrade
+```
+
+If `ensurepip` isn't available, you can install pip manually:
+```bash
+curl https://bootstrap.pypa.io/get-pip.py -o get-pip.py
+python3 get-pip.py
+```
+
+### Install lgtvremote-cli
+
 ```bash
 pip install .
 ```
 
-Or run directly:
+Or run directly without installing:
 
 ```bash
-python lgtvremote_cli.py <command>
+pip install websockets
+python3 lgtvremote_cli.py <command>
 ```
-
-### Requirements
-
-- Python 3.9+
-- `websockets` >= 12.0 (`pip install websockets`)
 
 ## Quick Start
 
