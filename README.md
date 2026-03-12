@@ -1,4 +1,4 @@
-# 📺 lgtvremote-cli
+# LG TV Remote CLI
 
 > Command-line interface for controlling LG webOS TVs over your local network.
 
