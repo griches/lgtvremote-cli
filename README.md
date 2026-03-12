@@ -1,12 +1,12 @@
 # LG TV Remote CLI
 
-> Command-line interface for controlling LG webOS TVs over your local network.
+## Command-line interface for controlling LG webOS TVs over your local network.
 
 Communicates via WebSocket using the SSAP (Simple Service Access Protocol) on port 3001. Supports TV discovery, PIN-based pairing, remote control, app launching, input switching, Wake-on-LAN, and more.
 
 ## Installation
 
-Zero dependencies — only Python 3.9+ is required (ships with macOS and most Linux distros).
+Only Python 3.9+ is required (ships with macOS and most Linux distros).
 
 ```bash
 # Clone the repo
