@@ -8,43 +8,50 @@ Communicates via WebSocket using the SSAP (Simple Service Access Protocol) on po
 
 ### Prerequisites
 
-You need Python 3.9+ and pip. If you don't have pip installed:
+Python 3.9+ is required.
 
-**macOS:**
+**macOS (Homebrew):**
 ```bash
-python3 -m ensurepip --upgrade
+brew install python3 pipx
 ```
 
 **Linux (Debian/Ubuntu):**
 ```bash
-sudo apt install python3-pip
+sudo apt install python3 python3-pip python3-venv pipx
 ```
 
 **Linux (Fedora/RHEL):**
 ```bash
-sudo dnf install python3-pip
+sudo dnf install python3 python3-pip pipx
 ```
 
 **Windows:**
 ```bash
-py -m ensurepip --upgrade
-```
-
-If `ensurepip` isn't available, you can install pip manually:
-```bash
-curl https://bootstrap.pypa.io/get-pip.py -o get-pip.py
-python3 get-pip.py
+# Python from python.org includes pip. Or via winget:
+winget install Python.Python.3
 ```
 
 ### Install lgtvremote-cli
 
+The recommended way on macOS is with `pipx`, which manages a virtual environment for you:
+
 ```bash
+pipx install .
+```
+
+Alternatively, use a virtual environment:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate   # On Windows: .venv\Scripts\activate
 pip install .
 ```
 
-Or run directly without installing:
+Or run directly without installing (just install the dependency):
 
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate
 pip install websockets
 python3 lgtvremote_cli.py <command>
 ```
