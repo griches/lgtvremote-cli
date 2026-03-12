@@ -737,64 +737,73 @@ def cmd_set_default(args):
 
 
 def cmd_pair(args):
-    """Pair with a TV using PIN authentication."""
+    """Pair with a TV. Handles both prompt-based (Accept on TV) and PIN-based pairing."""
     cfg = _load_config()
     ip = _get_device_ip(cfg, args.tv)
     if not ip:
-        print("Error: No TV specified and no default set. Use --tv <ip> or 'lgtv set-default <ip>'.", file=sys.stderr)
+        print("Error: No TV specified and no default set. Use --tv <ip> or 'lgtv pair --tv <ip>'.", file=sys.stderr)
         sys.exit(1)
 
     if ip not in cfg["devices"]:
         cfg["devices"][ip] = {"ip": ip, "name": ip}
 
-    print(f"Connecting to {ip}...")
+    name = cfg["devices"][ip].get("name", ip)
+    print(f"Connecting to {name} ({ip})...")
     ws = WebSocket.connect(f"wss://{ip}:3001", timeout=10)
 
-    # Send PIN registration request
+    # Try prompt-based pairing first (works on all webOS versions)
     reg_msg = {
         "type": "register",
         "id": str(uuid.uuid4()),
-        "payload": {**REGISTRATION_PAYLOAD, "pairingType": "pin"},
+        "payload": {**REGISTRATION_PAYLOAD, "pairingType": "prompt"},
     }
     ws.send(json.dumps(reg_msg))
 
-    print("A PIN should appear on your TV screen.")
-    pin = input("Enter the PIN shown on TV: ").strip()
+    print("Check your TV — accept the connection prompt or enter the PIN if one appears.")
 
-    # Send PIN
-    pin_msg = {
-        "type": "request",
-        "id": str(uuid.uuid4()),
-        "uri": "ssap://pairing/setPin",
-        "payload": {"pin": pin},
-    }
-    ws.send(json.dumps(pin_msg))
-
-    # Wait for registration
+    # Listen for TV response to determine pairing type
+    pin_sent = False
     start = time.monotonic()
-    while time.monotonic() - start < 15:
+    while time.monotonic() - start < 60:
         try:
-            raw = ws.recv(timeout=10)
+            raw = ws.recv(timeout=30)
         except (socket.timeout, TimeoutError):
             break
         except ConnectionError:
             break
+
         resp = json.loads(raw)
+        resp_type = resp.get("type", "")
         payload = resp.get("payload", {})
-        if resp.get("type") == "registered" or "client-key" in payload:
+
+        # Registration successful (prompt accepted or PIN verified)
+        if resp_type == "registered" or "client-key" in payload:
             key = payload.get("client-key")
             if key:
                 cfg["devices"][ip]["client_key"] = key
                 _save_config(cfg)
-                print(f"Paired successfully! Client key saved.")
+                print("Paired successfully! Client key saved.")
                 ws.close()
                 return
-        elif resp.get("type") == "error":
+
+        # TV is showing a PIN — ask user for it
+        elif payload.get("pairingType") == "pin" and not pin_sent:
+            pin = input("Enter the PIN shown on TV: ").strip()
+            pin_msg = {
+                "type": "request",
+                "id": str(uuid.uuid4()),
+                "uri": "ssap://pairing/setPin",
+                "payload": {"pin": pin},
+            }
+            ws.send(json.dumps(pin_msg))
+            pin_sent = True
+
+        elif resp_type == "error":
             print(f"Pairing failed: {resp.get('error', 'Unknown error')}", file=sys.stderr)
             ws.close()
             sys.exit(1)
 
-    print("Pairing timed out.", file=sys.stderr)
+    print("Pairing timed out. Did you accept on the TV?", file=sys.stderr)
     ws.close()
     sys.exit(1)
 
