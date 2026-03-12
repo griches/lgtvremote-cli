@@ -737,7 +737,7 @@ def cmd_set_default(args):
 
 
 def cmd_pair(args):
-    """Pair with a TV. Handles both prompt-based (Accept on TV) and PIN-based pairing."""
+    """Pair with a TV using PIN-based authentication."""
     cfg = _load_config()
     ip = _get_device_ip(cfg, args.tv)
     if not ip:
@@ -751,18 +751,20 @@ def cmd_pair(args):
     print(f"Connecting to {name} ({ip})...")
     ws = WebSocket.connect(f"wss://{ip}:3001", timeout=10)
 
-    # Try prompt-based pairing first (works on all webOS versions)
+    # Send PIN-based registration request (uppercase "PIN" as the TV expects)
     reg_msg = {
         "type": "register",
         "id": str(uuid.uuid4()),
-        "payload": {**REGISTRATION_PAYLOAD, "pairingType": "prompt"},
+        "payload": {
+            **REGISTRATION_PAYLOAD,
+            "pairingType": "PIN",
+            "forcePairing": False,
+        },
     }
     ws.send(json.dumps(reg_msg))
 
-    print("Check your TV — accept the connection prompt or enter the PIN if one appears.")
-
-    # Listen for TV response to determine pairing type
-    pin_sent = False
+    # Wait for TV to show PIN on screen
+    pin_requested = False
     start = time.monotonic()
     while time.monotonic() - start < 60:
         try:
@@ -776,7 +778,7 @@ def cmd_pair(args):
         resp_type = resp.get("type", "")
         payload = resp.get("payload", {})
 
-        # Registration successful (prompt accepted or PIN verified)
+        # Registration successful (PIN verified)
         if resp_type == "registered" or "client-key" in payload:
             key = payload.get("client-key")
             if key:
@@ -786,9 +788,9 @@ def cmd_pair(args):
                 ws.close()
                 return
 
-        # TV is showing a PIN — ask user for it
-        elif payload.get("pairingType") == "pin" and not pin_sent:
-            pin = input("Enter the PIN shown on TV: ").strip()
+        # TV is displaying a PIN — ask user to enter it
+        elif payload.get("pairingType") in ("PIN", "pin") and not pin_requested:
+            pin = input("Enter the PIN shown on your TV: ").strip()
             pin_msg = {
                 "type": "request",
                 "id": str(uuid.uuid4()),
@@ -796,14 +798,14 @@ def cmd_pair(args):
                 "payload": {"pin": pin},
             }
             ws.send(json.dumps(pin_msg))
-            pin_sent = True
+            pin_requested = True
 
         elif resp_type == "error":
             print(f"Pairing failed: {resp.get('error', 'Unknown error')}", file=sys.stderr)
             ws.close()
             sys.exit(1)
 
-    print("Pairing timed out. Did you accept on the TV?", file=sys.stderr)
+    print("Pairing timed out.", file=sys.stderr)
     ws.close()
     sys.exit(1)
 
