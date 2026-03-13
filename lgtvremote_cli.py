@@ -1378,6 +1378,54 @@ def cmd_number(args):
         sys.exit(1)
 
 
+# --- Color buttons ---
+def cmd_color(args):
+    """Send a color button press (red/green/yellow/blue) for teletext/HbbTV."""
+    key_map = {
+        "red": "RED", "green": "GREEN", "yellow": "YELLOW", "blue": "BLUE",
+    }
+
+    color = args.color.lower()
+    key = key_map.get(color)
+    if not key:
+        print(f"Error: Unknown color '{color}'. Valid: red, green, yellow, blue", file=sys.stderr)
+        sys.exit(1)
+
+    cfg = _load_config()
+    ip = _get_device_ip(cfg, args.tv)
+    if not ip:
+        print("Error: No TV specified and no default set.", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        device = cfg["devices"].get(ip, {})
+        ws, new_key = _ws_connect(ip, device.get("client_key"))
+
+        if new_key and new_key != device.get("client_key"):
+            cfg["devices"].setdefault(ip, {"ip": ip, "name": ip})["client_key"] = new_key
+            _save_config(cfg)
+
+        result = _send_request(ws, "ssap://com.webos.service.networkinput/getPointerInputSocket")
+        sock_path = result.get("socketPath")
+        if sock_path:
+            pointer_ws = WebSocket.connect(sock_path, timeout=5)
+            pointer_ws.send(f"type:button\nname:{key}\n\n")
+            time.sleep(0.1)
+            pointer_ws.close()
+
+        ws.close()
+        print(f"Sent: {color} button")
+    except ConnectionError as e:
+        if "NEEDS_PIN" in str(e):
+            print("Error: TV requires pairing. Run 'lgtv pair' first.", file=sys.stderr)
+        else:
+            print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except (OSError, TimeoutError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
 # --- Service menus ---
 def cmd_service(args):
     """Access service/advanced menus."""
@@ -1600,6 +1648,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_num = sub.add_parser("number", help="Send number key (0-9)")
     p_num.add_argument("digit", type=int, help="Digit 0-9")
 
+    # Color buttons
+    p_color = sub.add_parser("color", help="Press a color button (red/green/yellow/blue) for teletext/HbbTV")
+    p_color.add_argument("color", help="Color: red, green, yellow, blue")
+
     # Service menus
     p_svc = sub.add_parser("service", help="Open service/advanced menu (default password: 0413)")
     p_svc.add_argument("menu", help="Menu: instart, ezadjust, hotel, hidden, freesync")
@@ -1648,6 +1700,7 @@ def main():
         "apps": cmd_apps,
         "app": cmd_app,
         "number": cmd_number,
+        "color": cmd_color,
         "service": cmd_service,
         "open-url": cmd_open_url,
         "raw": cmd_raw,
