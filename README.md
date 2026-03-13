@@ -168,6 +168,16 @@ Launch any app by its display name — matches against what's installed on your 
 | `settings` | `com.webos.app.settings` |
 | `browser` | `com.webos.app.browser` |
 
+### Open URL
+
+Send a URL to the TV. YouTube URLs are automatically deep-linked into the YouTube TV app; all other URLs open in the built-in webOS browser.
+
+| Command | Description |
+|---------|-------------|
+| `lgtv open-url https://example.com` | Open URL in TV browser |
+| `lgtv open-url https://youtu.be/dQw4w9WgXcQ` | Open YouTube video in YouTube app |
+| `lgtv open-url example.com` | Scheme is added automatically if omitted |
+
 ### Number Keys
 
 | Command | Description |
