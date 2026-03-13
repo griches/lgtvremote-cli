@@ -1457,25 +1457,12 @@ def cmd_enrich(args):
 
 # --- Raw command ---
 def cmd_open_url(args):
-    """Open a URL on the TV. YouTube URLs deep-link into the YouTube app."""
+    """Open a URL on the TV in the built-in webOS browser."""
     url = args.url
-    # Normalise: add scheme if missing
     if not url.startswith(("http://", "https://")):
         url = "https://" + url
-
-    try:
-        from urllib.parse import urlparse
-        host = urlparse(url).hostname or ""
-    except Exception:
-        host = ""
-
-    if "youtube.com" in host or "youtu.be" in host:
-        _run_command(args, "ssap://system.launcher/launch",
-                     {"id": "youtube.leanback.v4", "params": {"contentTarget": url}})
-        print(f"Opened in YouTube app: {url}")
-    else:
-        _run_command(args, "ssap://system.launcher/open", {"target": url})
-        print(f"Opened URL: {url}")
+    _run_command(args, "ssap://system.launcher/open", {"target": url})
+    print(f"Opened URL: {url}")
 
 
 def cmd_raw(args):
@@ -1517,7 +1504,6 @@ def build_parser() -> argparse.ArgumentParser:
               lgtv play                         # Play media
               lgtv apps                         # List installed apps
               lgtv open-url https://example.com  # Open URL on TV
-              lgtv open-url youtu.be/dQw4w9WgXcQ # Open YouTube in app
               lgtv raw ssap://system/turnOff    # Send raw SSAP command
         """),
     )
