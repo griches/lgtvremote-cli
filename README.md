@@ -9,16 +9,19 @@ Communicates via WebSocket using the SSAP (Simple Service Access Protocol) on po
 Only Python 3.9+ is required (ships with macOS and most Linux distros).
 
 ```bash
-# Clone the repo
+# Install from PyPI (recommended)
+pip install lgtvremote-cli
+
+# Or with pipx (isolated environment, great for CLI tools)
+pipx install lgtvremote-cli
+```
+
+### Install from source
+
+```bash
 git clone https://github.com/griches/lgtvremote-cli.git
 cd lgtvremote-cli
-
-# Option 1: Add a shell alias (recommended)
-echo 'alias lgtv="python3 '$(pwd)'/lgtvremote_cli.py"' >> ~/.zshrc
-source ~/.zshrc
-
-# Option 2: Symlink into your PATH
-ln -s $(pwd)/lgtvremote_cli.py /usr/local/bin/lgtv
+pip install .
 ```
 
 If you don't have Python 3 installed:
