@@ -724,6 +724,21 @@ def _do_pair(ip: str, cfg: dict) -> bool:
                     for k, v in macs.items():
                         label = "MAC (wired)" if k == "mac" else "MAC (wifi)"
                         print(f"  {label}: {v}")
+
+                # Cache input labels
+                print("  Fetching input labels...")
+                try:
+                    result = _connect_and_send(
+                        ip, cfg, "ssap://tv/getExternalInputList",
+                        wait_response=True,
+                    )
+                    if result and "devices" in result:
+                        _cache_input_labels(ip, result["devices"])
+                        count = len([d for d in result["devices"] if d.get("label", "").strip()])
+                        print(f"  Cached {count} input label(s).")
+                except (OSError, TimeoutError, ConnectionError):
+                    pass  # Non-critical — labels will be cached on next 'inputs' call
+
                 return True
 
         elif payload.get("pairingType") in ("PIN", "pin") and not pin_requested:
@@ -1170,13 +1185,50 @@ def cmd_skip_back(args):
 
 
 # --- Input / HDMI ---
+
+def _cache_input_labels(ip: str, devices: list):
+    """Cache input labels from getExternalInputList response into device config."""
+    cfg = _load_config()
+    device = cfg["devices"].get(ip)
+    if not device:
+        return
+    labels = {}
+    for d in devices:
+        input_id = d.get("id")
+        label = d.get("label", "").strip()
+        if input_id and label:
+            labels[input_id] = label
+    if labels:
+        device["input_labels"] = labels
+        _save_config(cfg)
+
+
+def _resolve_input(args, name: str) -> str:
+    """Resolve an input name/number/alias to an input ID."""
+    upper = name.upper()
+    # Numeric shorthand: 1 -> HDMI_1
+    if upper.isdigit():
+        return f"HDMI_{upper}"
+    # Already a valid input ID
+    if upper.startswith("HDMI_") or upper.startswith("COMP_"):
+        return upper
+    # Check cached input labels for a match (case-insensitive)
+    cfg = _load_config()
+    ip = _get_device_ip(cfg, args.tv)
+    if ip:
+        device = cfg["devices"].get(ip, {})
+        labels = device.get("input_labels", {})
+        lower = name.lower()
+        for input_id, label in labels.items():
+            if label.lower() == lower:
+                return input_id
+    # Fall back to HDMI_ prefix
+    return f"HDMI_{upper}"
+
+
 def cmd_input(args):
     """Switch TV input."""
-    input_id = args.input.upper()
-    if input_id.isdigit():
-        input_id = f"HDMI_{input_id}"
-    elif not input_id.startswith("HDMI_") and not input_id.startswith("COMP_"):
-        input_id = f"HDMI_{input_id}"
+    input_id = _resolve_input(args, args.input)
 
     _run_command(args, "ssap://tv/switchInput", {"inputId": input_id})
     print(f"Switched to {input_id}.")
@@ -1184,8 +1236,14 @@ def cmd_input(args):
 
 def cmd_inputs(args):
     """List available inputs."""
+    cfg = _load_config()
+    ip = _get_device_ip(cfg, args.tv)
     result = _run_command(args, "ssap://tv/getExternalInputList", wait_response=True)
     if result and "devices" in result:
+        # Cache labels for alias resolution
+        if ip:
+            _cache_input_labels(ip, result["devices"])
+
         print("Available inputs:\n")
         for d in result["devices"]:
             label = d.get("label", d.get("id", "?"))
@@ -1195,6 +1253,38 @@ def cmd_inputs(args):
             print(f"  {input_id}: {label}{status}")
     else:
         print("Could not fetch input list.")
+
+
+def cmd_input_alias(args):
+    """Set or remove a custom alias for an input on this TV."""
+    cfg = _load_config()
+    ip = _get_device_ip(cfg, args.tv)
+    if not ip:
+        print("Error: No TV specified and no default set.", file=sys.stderr)
+        sys.exit(1)
+    device = cfg["devices"].get(ip)
+    if not device:
+        print(f"Error: No device found for {ip}.", file=sys.stderr)
+        sys.exit(1)
+
+    input_id = args.input_id.upper()
+    if not input_id.startswith("HDMI_") and not input_id.startswith("COMP_"):
+        input_id = f"HDMI_{input_id}"
+
+    labels = device.get("input_labels", {})
+    if args.alias:
+        labels[input_id] = args.alias
+        device["input_labels"] = labels
+        _save_config(cfg)
+        print(f"Set alias for {input_id}: {args.alias}")
+    else:
+        if input_id in labels:
+            removed = labels.pop(input_id)
+            device["input_labels"] = labels
+            _save_config(cfg)
+            print(f"Removed alias for {input_id} (was: {removed}).")
+        else:
+            print(f"No alias set for {input_id}.")
 
 
 # --- Apps ---
@@ -1619,9 +1709,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("skip-back", help="Skip backward / previous track")
 
     # Input
-    p_input = sub.add_parser("input", help="Switch TV input (e.g., HDMI_1 or just 1)")
-    p_input.add_argument("input", help="Input ID: 1, 2, 3, 4, HDMI_1, HDMI_2, etc.")
+    p_input = sub.add_parser("input", help="Switch TV input (e.g., HDMI_1, 1, or a label like 'PS5')")
+    p_input.add_argument("input", help="Input ID, number, or label (e.g., 1, HDMI_1, PS5)")
     sub.add_parser("inputs", help="List available inputs")
+    p_alias = sub.add_parser("input-alias", help="Set or remove a custom label for an input")
+    p_alias.add_argument("input_id", help="Input ID (e.g., HDMI_1 or just 1)")
+    p_alias.add_argument("alias", nargs="?", default=None, help="Label to set (omit to remove)")
 
     # Apps
     p_launch = sub.add_parser("launch", help="Launch an app")
@@ -1696,6 +1789,7 @@ def main():
         "skip-back": cmd_skip_back,
         "input": cmd_input,
         "inputs": cmd_inputs,
+        "input-alias": cmd_input_alias,
         "launch": cmd_launch,
         "apps": cmd_apps,
         "app": cmd_app,

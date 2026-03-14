@@ -132,7 +132,12 @@ Device data is stored in `~/.config/lgtvremote/devices.json`. This includes IP a
 | `lgtv input 1` | Switch to HDMI 1 |
 | `lgtv input 2` | Switch to HDMI 2 |
 | `lgtv input HDMI_3` | Switch to HDMI 3 (full ID) |
-| `lgtv inputs` | List all available inputs |
+| `lgtv input PS5` | Switch by label (case-insensitive) |
+| `lgtv inputs` | List all available inputs (also caches labels) |
+| `lgtv input-alias HDMI_1 PS5` | Set a custom alias for an input |
+| `lgtv input-alias HDMI_1` | Remove the alias for an input |
+
+Input labels are automatically cached per TV when you run `lgtv inputs` or `lgtv pair`, so you can switch by label name (e.g., `lgtv input ps5`) without an extra network round-trip. Custom aliases set with `input-alias` take precedence over TV-reported labels.
 
 ### Apps
 
