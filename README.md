@@ -80,6 +80,7 @@ Device data is stored in `~/.config/lgtvremote/devices.json`. This includes IP a
 | `lgtv on` | Turn on TV via Wake-on-LAN (requires stored MAC address) |
 | `lgtv off` | Turn off TV |
 | `lgtv power` | Toggle power (off via WebSocket, on via WOL if unreachable) |
+| `lgtv power-status` | Check if TV is on or off (JSON output, exit code 1 if off/unreachable) |
 
 ### Volume
 
@@ -105,10 +106,13 @@ Device data is stored in `~/.config/lgtvremote/devices.json`. This includes IP a
 | `lgtv nav home` | Go to home screen |
 | `lgtv nav menu` | Open menu |
 
-### Channels
+### Live TV & Channels
 
 | Command | Description |
 |---------|-------------|
+| `lgtv livetv` | Switch to Live TV tuner |
+| `lgtv livetv --channel <number>` | Switch to Live TV and tune to a channel |
+| `lgtv channels` | List available TV channels (JSON output) |
 | `lgtv channel up` | Next channel |
 | `lgtv channel down` | Previous channel |
 | `lgtv channel set <number>` | Switch to specific channel |
@@ -250,9 +254,9 @@ lgtv set-default 192.168.1.100
 # Commands use default TV
 lgtv off
 
-# Override with --tv flag
+# Override with --tv flag (IP or name)
 lgtv --tv 192.168.1.101 off
-lgtv --tv 192.168.1.101 launch netflix
+lgtv --tv "Bedroom" launch netflix
 ```
 
 ## Using with AI Assistants
