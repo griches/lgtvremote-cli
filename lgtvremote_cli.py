@@ -24,6 +24,8 @@ import time
 import uuid
 from typing import Any, Optional
 
+__version__ = "1.0.0"
+
 # ---------------------------------------------------------------------------
 # Minimal WebSocket client (RFC 6455) — no external dependencies
 # ---------------------------------------------------------------------------
@@ -1646,6 +1648,7 @@ def build_parser() -> argparse.ArgumentParser:
         """),
     )
 
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("--tv", metavar="IP", help="TV IP address (overrides default)")
 
     sub = parser.add_subparsers(dest="command", help="Command to run")
