@@ -24,7 +24,7 @@ import time
 import uuid
 from typing import Any, Optional
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 # ---------------------------------------------------------------------------
 # Minimal WebSocket client (RFC 6455) — no external dependencies
@@ -1045,6 +1045,28 @@ def cmd_power(args):
             sys.exit(1)
 
 
+def cmd_power_status(args):
+    """Check if the TV is on or off by attempting a WebSocket connection."""
+    cfg = _load_config()
+    ip = _get_device_ip(cfg, args.tv)
+    if not ip:
+        print("Error: No TV specified and no default set.", file=sys.stderr)
+        sys.exit(1)
+
+    device = cfg["devices"].get(ip, {})
+    client_key = device.get("client_key")
+
+    try:
+        ws, _ = _ws_connect(ip, client_key, timeout=3.0)
+        ws.close()
+        status = {"power": "on", "ip": ip, "name": device.get("name", ip)}
+        print(json.dumps(status))
+    except (ConnectionError, OSError, TimeoutError):
+        status = {"power": "off", "ip": ip, "name": device.get("name", ip)}
+        print(json.dumps(status))
+        sys.exit(1)
+
+
 # --- Volume ---
 def cmd_volume_up(args):
     _run_command(args, "ssap://audio/volumeUp")
@@ -1154,6 +1176,30 @@ def cmd_channel_down(args):
 def cmd_set_channel(args):
     _run_command(args, "ssap://tv/openChannel", {"channelNumber": str(args.number)})
     print(f"Switched to channel {args.number}.")
+
+
+# --- Live TV ---
+
+def cmd_livetv(args):
+    """Switch to Live TV, optionally tuning to a channel."""
+    _run_command(args, "ssap://system.launcher/launch", {"id": "com.webos.app.livetv"})
+    if args.channel:
+        # Give the app a moment to launch before tuning
+        time.sleep(0.5)
+        _run_command(args, "ssap://tv/openChannel", {"channelNumber": str(args.channel)})
+        print(f"Switched to Live TV, channel {args.channel}.")
+    else:
+        print("Switched to Live TV.")
+
+
+def cmd_channels(args):
+    """List available TV channels as JSON."""
+    result = _run_command(args, "ssap://tv/getChannelList", wait_response=True)
+    if result and "channelList" in result:
+        channels = result["channelList"]
+        print(json.dumps(channels, indent=2))
+    else:
+        print("Could not fetch channel list.")
 
 
 # --- Media ---
@@ -1678,6 +1724,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("on", help="Turn on TV (Wake-on-LAN)")
     sub.add_parser("off", help="Turn off TV")
     sub.add_parser("power", help="Toggle TV power")
+    sub.add_parser("power-status", help="Check if TV is on or off (JSON output)")
 
     # Volume
     vol = sub.add_parser("volume", help="Volume control")
@@ -1701,6 +1748,11 @@ def build_parser() -> argparse.ArgumentParser:
     ch_sub.add_parser("down", help="Channel down")
     p_cs = ch_sub.add_parser("set", help="Switch to channel number")
     p_cs.add_argument("number", type=int, help="Channel number")
+
+    # Live TV
+    p_livetv = sub.add_parser("livetv", help="Switch to Live TV tuner")
+    p_livetv.add_argument("--channel", metavar="NUM", help="Tune to a specific channel number")
+    sub.add_parser("channels", help="List available TV channels (JSON output)")
 
     # Media
     sub.add_parser("play", help="Play")
@@ -1783,6 +1835,9 @@ def main():
         "on": cmd_on,
         "off": cmd_off,
         "power": cmd_power,
+        "power-status": cmd_power_status,
+        "livetv": cmd_livetv,
+        "channels": cmd_channels,
         "play": cmd_play,
         "pause": cmd_pause,
         "stop": cmd_stop,
