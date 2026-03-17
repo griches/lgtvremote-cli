@@ -263,17 +263,60 @@ def _get_device_ip(cfg: dict, tv: Optional[str]) -> Optional[str]:
         # Direct IP match
         if tv in cfg["devices"]:
             return tv
-        # Name match (case-insensitive)
+        # Name match (case-insensitive) — prefer paired devices over stale entries
         lower = tv.lower()
+        best_ip = None
         for dev_ip, dev in cfg["devices"].items():
             if dev.get("name", "").lower() == lower:
-                return dev_ip
+                if dev.get("client_key"):
+                    best_ip = dev_ip  # keep searching; last paired wins, but any paired beats unpaired
+                elif best_ip is None:
+                    best_ip = dev_ip
+        if best_ip:
+            return best_ip
         # Fall back to treating it as an IP anyway (for new/unknown devices)
         return tv
     if cfg.get("default"):
         return cfg["default"]
     if len(cfg["devices"]) == 1:
         return next(iter(cfg["devices"]))
+    return None
+
+
+def _migrate_device_ip(cfg: dict, new_ip: str, mac: Optional[str] = None,
+                       wifi_mac: Optional[str] = None,
+                       name: Optional[str] = None,
+                       model: Optional[str] = None) -> Optional[str]:
+    """If an existing device matches by MAC (or name+model), migrate it to the new IP.
+
+    Returns the old IP if a migration happened, None otherwise.
+    """
+    if new_ip in cfg["devices"]:
+        return None  # Already exists at this IP
+
+    for old_ip, dev in list(cfg["devices"].items()):
+        if old_ip == new_ip:
+            continue
+        # Match by MAC address (most reliable)
+        if mac and dev.get("mac") and dev["mac"].upper() == mac.upper():
+            pass
+        elif wifi_mac and dev.get("wifi_mac") and dev["wifi_mac"].upper() == wifi_mac.upper():
+            pass
+        elif (name and model and dev.get("name") == name and dev.get("model") == model):
+            pass
+        else:
+            continue
+
+        # Found a match — migrate to new IP
+        old_name = dev.get("name", old_ip)
+        print(f"  IP changed: {old_name} moved from {old_ip} to {new_ip}")
+        dev["ip"] = new_ip
+        cfg["devices"][new_ip] = dev
+        del cfg["devices"][old_ip]
+        if cfg.get("default") == old_ip:
+            cfg["default"] = new_ip
+        return old_ip
+
     return None
 
 
@@ -789,6 +832,10 @@ def cmd_scan(args):
         info = _enrich_device(ip, location=d.get("location"))
         name = info.get("name", d["name"])
 
+        # Check if this TV was previously saved under a different IP
+        _migrate_device_ip(cfg, ip, name=info.get("name") or name,
+                           model=info.get("model"))
+
         # Auto-add the device
         device = cfg["devices"].get(ip, {"ip": ip})
         device["ip"] = ip
@@ -842,6 +889,17 @@ def cmd_add(args):
     cfg = _load_config()
     ip = args.ip
 
+    # Enrich first so we can detect IP changes via name+model
+    info = {}
+    if not args.no_enrich:
+        print(f"Fetching device info from {ip}...")
+        info = _enrich_device(ip)
+
+    # Check if this TV was previously saved under a different IP
+    _migrate_device_ip(cfg, ip, mac=args.mac, wifi_mac=args.wifi_mac,
+                       name=info.get("name") or args.name,
+                       model=info.get("model"))
+
     device = cfg["devices"].get(ip, {"ip": ip})
     device["ip"] = ip
     if args.name:
@@ -853,9 +911,7 @@ def cmd_add(args):
     if args.wifi_mac:
         device["wifi_mac"] = _format_mac(args.wifi_mac)
 
-    if not args.no_enrich:
-        print(f"Fetching device info from {ip}...")
-        info = _enrich_device(ip)
+    if info:
         if info.get("name") and not args.name and device.get("name") == ip:
             device["name"] = info["name"]
         if info.get("model") and "model" not in device:
