@@ -258,9 +258,18 @@ def _get_device(cfg: dict, ip: Optional[str]) -> Optional[dict]:
     return None
 
 
-def _get_device_ip(cfg: dict, ip: Optional[str]) -> Optional[str]:
-    if ip:
-        return ip
+def _get_device_ip(cfg: dict, tv: Optional[str]) -> Optional[str]:
+    if tv:
+        # Direct IP match
+        if tv in cfg["devices"]:
+            return tv
+        # Name match (case-insensitive)
+        lower = tv.lower()
+        for dev_ip, dev in cfg["devices"].items():
+            if dev.get("name", "").lower() == lower:
+                return dev_ip
+        # Fall back to treating it as an IP anyway (for new/unknown devices)
+        return tv
     if cfg.get("default"):
         return cfg["default"]
     if len(cfg["devices"]) == 1:
@@ -1695,7 +1704,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
-    parser.add_argument("--tv", metavar="IP", help="TV IP address (overrides default)")
+    parser.add_argument("--tv", metavar="TV", help="TV IP address or name (overrides default)")
 
     sub = parser.add_subparsers(dest="command", help="Command to run")
 
