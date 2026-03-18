@@ -1239,32 +1239,19 @@ def cmd_channel_down(args):
     print("Channel down.")
 
 def cmd_set_channel(args):
-    _run_command(args, "ssap://tv/openChannel", {"channelNumber": str(args.number)})
-    print(f"Switched to channel {args.number}.")
+    print("Channel selection is not supported. Use channel up/down instead.")
 
 
 # --- Live TV ---
 
 def cmd_livetv(args):
-    """Switch to Live TV, optionally tuning to a channel."""
+    """Switch to Live TV."""
     _run_command(args, "ssap://system.launcher/launch", {"id": "com.webos.app.livetv"})
-    if args.channel:
-        # Give the app a moment to launch before tuning
-        time.sleep(0.5)
-        _run_command(args, "ssap://tv/openChannel", {"channelNumber": str(args.channel)})
-        print(f"Switched to Live TV, channel {args.channel}.")
-    else:
-        print("Switched to Live TV.")
+    print("Switched to Live TV.")
 
 
 def cmd_channels(args):
-    """List available TV channels as JSON."""
-    result = _run_command(args, "ssap://tv/getChannelList", wait_response=True)
-    if result and "channelList" in result:
-        channels = result["channelList"]
-        print(json.dumps(channels, indent=2))
-    else:
-        print("Could not fetch channel list.")
+    print("Channel listing is not supported.")
 
 
 # --- Media ---
@@ -1816,8 +1803,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Live TV
     p_livetv = sub.add_parser("livetv", help="Switch to Live TV tuner")
-    p_livetv.add_argument("--channel", metavar="NUM", help="Tune to a specific channel number")
-    sub.add_parser("channels", help="List available TV channels (JSON output)")
+    sub.add_parser("channels", help="List available TV channels (not supported)")
 
     # Media
     sub.add_parser("play", help="Play")

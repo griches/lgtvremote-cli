@@ -111,11 +111,8 @@ Device data is stored in `~/.config/lgtvremote/devices.json`. This includes IP a
 | Command | Description |
 |---------|-------------|
 | `lgtv livetv` | Switch to Live TV tuner |
-| `lgtv livetv --channel <number>` | Switch to Live TV and tune to a channel |
-| `lgtv channels` | List available TV channels (JSON output) |
 | `lgtv channel up` | Next channel |
 | `lgtv channel down` | Previous channel |
-| `lgtv channel set <number>` | Switch to specific channel |
 
 ### Media Controls
 
