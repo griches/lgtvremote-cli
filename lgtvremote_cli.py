@@ -331,7 +331,11 @@ REGISTRATION_PAYLOAD = {
             "created": "20140509",
             "appId": "com.lge.test",
             "vendorId": "com.lge",
-            "localizedAppNames": {"": "LG Remote CLI"},
+            "localizedAppNames": {
+                "": "LG Remote App",
+                "ko-KR": "\ub9ac\ubaa8\ucee8 \uc571",
+                "zxx-XX": "\u041b\u0413 R\u044d\u043cot\u044d A\u041f\u041f",
+            },
             "localizedVendorNames": {"": "LG Electronics"},
             "permissions": [
                 "TEST_SECURE", "CONTROL_INPUT_TEXT", "CONTROL_MOUSE_AND_KEYBOARD",
@@ -339,11 +343,7 @@ REGISTRATION_PAYLOAD = {
                 "SEARCH", "WRITE_SETTINGS", "WRITE_NOTIFICATION_ALERT",
                 "CONTROL_POWER", "READ_CURRENT_CHANNEL", "READ_RUNNING_APPS",
                 "READ_UPDATE_INFO", "UPDATE_FROM_REMOTE_APP", "READ_LGE_TV_INPUT_EVENTS",
-                "READ_TV_CURRENT_TIME", "LAUNCH", "LAUNCH_WEBAPP", "CONTROL_AUDIO",
-                "CONTROL_DISPLAY", "CONTROL_INPUT_JOYSTICK", "CONTROL_INPUT_MEDIA_RECORDING",
-                "CONTROL_INPUT_MEDIA_PLAYBACK", "CONTROL_INPUT_TV", "READ_APP_STATUS",
-                "READ_INPUT_DEVICE_LIST", "READ_NETWORK_STATE", "READ_TV_CHANNEL_LIST",
-                "WRITE_NOTIFICATION_TOAST", "READ_POWER_STATE", "READ_COUNTRY_INFO",
+                "READ_TV_CURRENT_TIME",
             ],
             "serial": "2f930e2d2cfe083771f68e4fe7bb07"
         },
@@ -352,20 +352,27 @@ REGISTRATION_PAYLOAD = {
             "TEST_OPEN", "TEST_PROTECTED", "CONTROL_AUDIO",
             "CONTROL_DISPLAY", "CONTROL_INPUT_JOYSTICK",
             "CONTROL_INPUT_MEDIA_RECORDING", "CONTROL_INPUT_MEDIA_PLAYBACK",
-            "CONTROL_INPUT_TV", "CONTROL_POWER", "READ_APP_STATUS",
-            "READ_CURRENT_CHANNEL", "READ_INPUT_DEVICE_LIST",
-            "READ_NETWORK_STATE", "READ_RUNNING_APPS",
-            "READ_TV_CHANNEL_LIST", "WRITE_NOTIFICATION_TOAST",
-            "READ_POWER_STATE", "READ_COUNTRY_INFO",
-            "READ_SETTINGS", "CONTROL_TV_SCREEN",
-            "CONTROL_TV_STANBY", "CONTROL_FAVORITE_GROUP",
-            "CONTROL_USER_INFO", "CHECK_BLUETOOTH_DEVICE",
-            "CONTROL_BLUETOOTH", "CONTROL_TIMER_INFO",
-            "STB_INTERNAL_CONNECTION", "CONTROL_RECORDING",
-            "READ_RECORDING_STATE", "WRITE_NOTIFICATION_ALERT",
-            "CONTROL_INPUT_TEXT", "CONTROL_MOUSE_AND_KEYBOARD",
-            "READ_INSTALLED_APPS", "CONTROL_INPUT_MEDIA_RECORDING",
-        ]
+            "CONTROL_INPUT_TV", "CONTROL_MOUSE_AND_KEYBOARD",
+            "CONTROL_INPUT_TEXT", "CONTROL_POWER",
+            "READ_APP_STATUS", "READ_CURRENT_CHANNEL",
+            "READ_INPUT_DEVICE_LIST", "READ_NETWORK_STATE",
+            "READ_RUNNING_APPS", "READ_TV_CHANNEL_LIST",
+            "WRITE_NOTIFICATION_TOAST", "READ_POWER_STATE",
+            "READ_COUNTRY_INFO", "READ_SETTINGS",
+            "CONTROL_TV_SCREEN", "CONTROL_TV_STANBY",
+            "CONTROL_FAVORITE_GROUP", "CONTROL_USER_INFO",
+            "CHECK_BLUETOOTH_DEVICE", "CONTROL_BLUETOOTH",
+            "CONTROL_TIMER_INFO", "STB_INTERNAL_CONNECTION",
+            "CONTROL_RECORDING", "READ_RECORDING_STATE",
+            "WRITE_RECORDING_LIST", "READ_RECORDING_LIST",
+            "READ_RECORDING_SCHEDULE", "WRITE_RECORDING_SCHEDULE",
+        ],
+        "signatures": [
+            {
+                "signatureVersion": 1,
+                "signature": "eyJhbGdvcml0aG0iOiJSU0EtU0hBMjU2Iiwia2V5SWQiOiJ0ZXN0LXNpZ25pbmctY2VydCIsInNpZ25hdHVyZVZlcnNpb24iOjF9.hrVRgjCwXVvE2OOSpDZ58hR+59aFNwYDyjQgKk3auukd7pcegmE2CzPCa0bJ0ZsRAcKkCTJrWo5iDzNhMBWRyaMOv5zWSrthlf7G128qvIlpMT0YNY+n/FaOHE73uLrS/g7swl3/qH/BGFG2Hu4RlL48eb3lLKqTt2xKHdCs6Cd4RMfJPYnzgvI4BNrFUKsjkcu+WD4OO2A27Pq1n50cMchmcaXadJhGrOqH5YmHdOCj5NSHzJYrsW0HPlpuAx/ECMeIZYDh6RMqaFM2DXzdKX9NmmyqzJ3o/0lkk/N97gfVRLW5hA29yeAwaCViZNCP8iC9aO0q9fQojoa7NQnAtw==",
+            }
+        ],
     }
 }
 
@@ -386,10 +393,10 @@ def _ws_connect(ip: str, client_key: Optional[str] = None, timeout: float = 10.0
     reg_msg = {
         "type": "register",
         "id": str(uuid.uuid4()),
-        "payload": {**reg, "pairingType": pairing_type},
+        "payload": {**reg, "pairingType": pairing_type, "forcePairing": client_key is None},
     }
 
-    ws.send(json.dumps(reg_msg))
+    ws.send(json.dumps(reg_msg, ensure_ascii=False, separators=(",", ":")))
 
     # Wait for registration response
     new_key = client_key
@@ -454,7 +461,7 @@ def _send_request(ws: WebSocket, uri: str, payload: Optional[dict] = None, subsc
         resp = json.loads(raw)
         if resp.get("id") == msg_id:
             return resp.get("payload", {})
-    return {}
+    return None
 
 
 def _send_button(ws: WebSocket, uri: str, payload: Optional[dict] = None):
@@ -1198,7 +1205,7 @@ def cmd_nav(args):
 
         # Get pointer input socket
         result = _send_request(ws, "ssap://com.webos.service.networkinput/getPointerInputSocket")
-        sock_path = result.get("socketPath")
+        sock_path = (result or {}).get("socketPath")
         if not sock_path:
             # Fallback for basic nav
             fallback_uris = {
@@ -1496,9 +1503,8 @@ _SETTINGS_NOTE = "(may not work on older TVs)"
 
 
 def cmd_screen_off(args):
-    _run_command(args, "ssap://com.webos.service.settings/setSystemSettings",
-                 {"category": "display", "settings": {"screenOff": True}})
-    print(f"Screen off. {_SETTINGS_NOTE}")
+    _run_command(args, "ssap://com.webos.service.tvpower/power/turnOffScreen")
+    print("Screen off (audio continues).")
 
 
 def cmd_picture_mode(args):
@@ -1525,9 +1531,8 @@ def cmd_audio_track(args):
 
 
 def cmd_screen_on(args):
-    _run_command(args, "ssap://com.webos.service.settings/setSystemSettings",
-                 {"category": "display", "settings": {"screenOff": False}})
-    print(f"Screen on. {_SETTINGS_NOTE}")
+    _run_command(args, "ssap://com.webos.service.tvpower/power/turnOnScreen")
+    print("Screen on.")
 
 
 
@@ -1554,7 +1559,7 @@ def cmd_number(args):
             _save_config(cfg)
 
         result = _send_request(ws, "ssap://com.webos.service.networkinput/getPointerInputSocket")
-        sock_path = result.get("socketPath")
+        sock_path = (result or {}).get("socketPath")
         if sock_path:
             pointer_ws = WebSocket.connect(sock_path, timeout=5)
             pointer_ws.send(f"type:button\nname:{num}\n\n")
@@ -1596,7 +1601,7 @@ def cmd_color(args):
             _save_config(cfg)
 
         result = _send_request(ws, "ssap://com.webos.service.networkinput/getPointerInputSocket")
-        sock_path = result.get("socketPath")
+        sock_path = (result or {}).get("socketPath")
         if sock_path:
             pointer_ws = WebSocket.connect(sock_path, timeout=5)
             pointer_ws.send(f"type:button\nname:{key}\n\n")
@@ -1713,11 +1718,47 @@ def cmd_raw(args):
             print("Error: Invalid JSON payload.", file=sys.stderr)
             sys.exit(1)
 
-    result = _run_command(args, args.uri, payload, wait_response=True)
-    if result:
-        print(json.dumps(result, indent=2))
+    cfg = _load_config()
+    ip = _get_device_ip(cfg, args.tv)
+    if not ip:
+        print("Error: No TV specified and no default set.", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        client_key = cfg["devices"].get(ip, {}).get("client_key")
+        ws, new_key = _ws_connect(ip, client_key)
+        if new_key and new_key != client_key:
+            cfg["devices"].setdefault(ip, {"ip": ip, "name": ip})["client_key"] = new_key
+            _save_config(cfg)
+
+        msg_id = str(uuid.uuid4())
+        msg = {"type": "request", "id": msg_id, "uri": args.uri}
+        if payload:
+            msg["payload"] = payload
+        ws.send(json.dumps(msg))
+
+        start = time.monotonic()
+        full_resp = None
+        while time.monotonic() - start < 10:
+            try:
+                raw = ws.recv(timeout=5)
+            except (socket.timeout, TimeoutError):
+                break
+            except ConnectionError:
+                break
+            resp = json.loads(raw)
+            if resp.get("id") == msg_id:
+                full_resp = resp
+                break
+        ws.close()
+    except (ConnectionError, OSError, TimeoutError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if full_resp is None:
+        print("Command sent (no response received).")
     else:
-        print("Command sent (no response data).")
+        print(json.dumps(full_resp, indent=2))
 
 
 # ---------------------------------------------------------------------------
