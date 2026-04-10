@@ -1548,6 +1548,39 @@ def cmd_energy_saving(args):
     print(f"Energy saving set to: {mode} {_SETTINGS_NOTE}")
 
 
+def cmd_screenshot(args):
+    payload = {"method": args.method.upper(), "format": args.format.upper()}
+    if args.width:
+        payload["width"] = args.width
+    if args.height:
+        payload["height"] = args.height
+
+    result = _run_command(args, "ssap://tv/executeOneShot", payload, wait_response=True)
+    if not result or not result.get("imageUri"):
+        print("Error: TV did not return an image URI.", file=sys.stderr)
+        sys.exit(1)
+
+    image_uri = result["imageUri"]
+    ext = args.format.lower()
+    if ext == "jpg":
+        ext = "jpg"
+    output = args.output or f"screenshot-{time.strftime('%Y%m%d-%H%M%S')}.{ext}"
+
+    import urllib.request
+    ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ssl_ctx.check_hostname = False
+    ssl_ctx.verify_mode = ssl.CERT_NONE
+    try:
+        with urllib.request.urlopen(image_uri, timeout=15, context=ssl_ctx) as resp:
+            data = resp.read()
+    except (OSError, urllib.error.URLError) as e:
+        print(f"Error fetching screenshot from TV: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    pathlib.Path(output).write_bytes(data)
+    print(f"Saved {len(data)} bytes to {output}")
+
+
 
 # --- Number key ---
 def cmd_number(args):
@@ -1900,6 +1933,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_eco = sub.add_parser("energy-saving", help="Set energy saving mode" + _newer)
     p_eco.add_argument("mode", help="Mode: auto, off, min, med, max, screen_off")
 
+    p_shot = sub.add_parser(
+        "screenshot",
+        help="Capture a screenshot from the TV",
+        description=(
+            "Capture a screenshot from the TV via SSAP. "
+            "Note: --width, --height, --format, and --method are honored only on newer firmwares. "
+            "Older webOS versions silently ignore them and always return a 960x540 JPEG."
+        ),
+    )
+    p_shot.add_argument("output", nargs="?", help="Output file path (default: screenshot-<timestamp>.<ext>)")
+    p_shot.add_argument("--width", type=int, help="Capture width (newer TVs only; older firmwares locked to 960)")
+    p_shot.add_argument("--height", type=int, help="Capture height (newer TVs only; older firmwares locked to 540)")
+    p_shot.add_argument("--format", default="JPG", help="Image format: JPG, PNG, BMP (newer TVs only; older firmwares locked to JPG)")
+    p_shot.add_argument("--method", default="DISPLAY",
+                        help="Capture method: DISPLAY, SCREEN, SCREEN_WITH_SOURCE_VIDEO, VIDEO, GRAPHIC (newer TVs only)")
+
     # Number key
     p_num = sub.add_parser("number", help="Send number key (0-9)")
     p_num.add_argument("digit", type=int, help="Digit 0-9")
@@ -1972,6 +2021,7 @@ def main():
         "subtitles": cmd_subtitles,
         "audio-track": cmd_audio_track,
         "energy-saving": cmd_energy_saving,
+        "screenshot": cmd_screenshot,
     }
 
     # Volume subcommands

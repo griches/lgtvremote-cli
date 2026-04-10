@@ -209,6 +209,17 @@ These commands use `setSystemSettings` which may not be available on older webOS
 | `lgtv subtitles` | Toggle subtitles |
 | `lgtv audio-track` | Cycle audio track |
 | `lgtv energy-saving <mode>` | Set energy saving mode (auto, off, min, med, max, screen_off) |
+| `lgtv screenshot [output]` | Capture a screenshot from the TV (saves to `screenshot-<timestamp>.jpg` by default) |
+
+#### Screenshot options
+
+`--width`, `--height`, `--format` (JPG/PNG/BMP), and `--method` (DISPLAY/VIDEO/GRAPHIC/SCREEN_WITH_SOURCE_VIDEO) are supported only on newer webOS firmwares. Older TVs silently ignore these flags and always return a 960x540 JPEG regardless of what you pass.
+
+```bash
+lgtv screenshot                                      # 960x540 JPEG to cwd
+lgtv screenshot login.png --format PNG               # newer TVs only
+lgtv screenshot --width 3840 --height 2160           # 4K — newer TVs only
+```
 
 ### Service Menus (Advanced)
 
