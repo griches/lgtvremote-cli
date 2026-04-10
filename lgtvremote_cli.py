@@ -1535,6 +1535,19 @@ def cmd_screen_on(args):
     print("Screen on.")
 
 
+_ENERGY_SAVING_MODES = ("auto", "off", "min", "med", "max", "screen_off")
+
+
+def cmd_energy_saving(args):
+    mode = args.mode.lower()
+    if mode not in _ENERGY_SAVING_MODES:
+        print(f"Error: mode must be one of {', '.join(_ENERGY_SAVING_MODES)}.", file=sys.stderr)
+        sys.exit(1)
+    _run_command(args, "ssap://settings/setSystemSettings",
+                 {"category": "picture", "settings": {"energySaving": mode}})
+    print(f"Energy saving set to: {mode} {_SETTINGS_NOTE}")
+
+
 
 # --- Number key ---
 def cmd_number(args):
@@ -1884,6 +1897,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("subtitles", help="Toggle subtitles" + _newer)
     sub.add_parser("audio-track", help="Cycle audio track" + _newer)
 
+    p_eco = sub.add_parser("energy-saving", help="Set energy saving mode" + _newer)
+    p_eco.add_argument("mode", help="Mode: auto, off, min, med, max, screen_off")
+
     # Number key
     p_num = sub.add_parser("number", help="Send number key (0-9)")
     p_num.add_argument("digit", type=int, help="Digit 0-9")
@@ -1955,6 +1971,7 @@ def main():
         "sound-mode": cmd_sound_mode,
         "subtitles": cmd_subtitles,
         "audio-track": cmd_audio_track,
+        "energy-saving": cmd_energy_saving,
     }
 
     # Volume subcommands

@@ -208,6 +208,7 @@ These commands use `setSystemSettings` which may not be available on older webOS
 | `lgtv sound-mode <mode>` | Set sound mode (e.g., standard, cinema, game) |
 | `lgtv subtitles` | Toggle subtitles |
 | `lgtv audio-track` | Cycle audio track |
+| `lgtv energy-saving <mode>` | Set energy saving mode (auto, off, min, med, max, screen_off) |
 
 ### Service Menus (Advanced)
 
