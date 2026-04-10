@@ -24,6 +24,10 @@ cd lgtvremote-cli
 pip install .
 ```
 
+### Upgrading from older versions
+
+Run `lgtv pair` after upgrading to 1.3.1 — the registration manifest changed, and existing client keys are frozen to their original (more limited) permission set. Re-pairing issues a fresh key under the new manifest.
+
 If you don't have Python 3 installed:
 
 | Platform | Install |
