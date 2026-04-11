@@ -953,9 +953,9 @@ def cmd_add(args):
 def cmd_remove(args):
     """Remove a saved TV."""
     cfg = _load_config()
-    ip = args.ip
-    if ip not in cfg["devices"]:
-        print(f"Error: No TV saved with IP {ip}", file=sys.stderr)
+    ip = _get_device_ip(cfg, args.tv)
+    if not ip or ip not in cfg["devices"]:
+        print(f"Error: No TV saved matching '{args.tv}'", file=sys.stderr)
         sys.exit(1)
 
     name = cfg["devices"][ip].get("name", ip)
@@ -988,9 +988,9 @@ def cmd_list(args):
 def cmd_set_default(args):
     """Set the default TV."""
     cfg = _load_config()
-    ip = args.ip
-    if ip not in cfg["devices"]:
-        print(f"Error: No TV saved with IP {ip}. Use 'lgtv add {ip}' first.", file=sys.stderr)
+    ip = _get_device_ip(cfg, args.tv)
+    if not ip or ip not in cfg["devices"]:
+        print(f"Error: No TV saved matching '{args.tv}'. Use 'lgtv add <ip>' first.", file=sys.stderr)
         sys.exit(1)
     cfg["default"] = ip
     _save_config(cfg)
@@ -1549,22 +1549,13 @@ def cmd_energy_saving(args):
 
 
 def cmd_screenshot(args):
-    payload = {"method": args.method.upper(), "format": args.format.upper()}
-    if args.width:
-        payload["width"] = args.width
-    if args.height:
-        payload["height"] = args.height
-
-    result = _run_command(args, "ssap://tv/executeOneShot", payload, wait_response=True)
+    result = _run_command(args, "ssap://tv/executeOneShot", wait_response=True)
     if not result or not result.get("imageUri"):
         print("Error: TV did not return an image URI.", file=sys.stderr)
         sys.exit(1)
 
     image_uri = result["imageUri"]
-    ext = args.format.lower()
-    if ext == "jpg":
-        ext = "jpg"
-    output = args.output or f"screenshot-{time.strftime('%Y%m%d-%H%M%S')}.{ext}"
+    output = args.output or f"screenshot-{time.strftime('%Y%m%d-%H%M%S')}.jpg"
 
     import urllib.request
     ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
@@ -1849,12 +1840,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_add.add_argument("--no-enrich", action="store_true", help="Skip auto-fetching device info")
 
     p_rm = sub.add_parser("remove", help="Remove a saved TV")
-    p_rm.add_argument("ip", help="TV IP address")
+    p_rm.add_argument("tv", help="TV IP address or name")
 
     sub.add_parser("list", help="List saved TVs")
 
     p_def = sub.add_parser("set-default", help="Set the default TV")
-    p_def.add_argument("ip", help="TV IP address")
+    p_def.add_argument("tv", help="TV IP address or name")
 
     sub.add_parser("pair", help="Pair with TV (PIN authentication)")
     sub.add_parser("enrich", help="Fetch/update device info (model, MACs)")
@@ -1933,21 +1924,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_eco = sub.add_parser("energy-saving", help="Set energy saving mode" + _newer)
     p_eco.add_argument("mode", help="Mode: auto, off, min, med, max, screen_off")
 
-    p_shot = sub.add_parser(
-        "screenshot",
-        help="Capture a screenshot from the TV",
-        description=(
-            "Capture a screenshot from the TV via SSAP. "
-            "Note: --width, --height, --format, and --method are honored only on newer firmwares. "
-            "Older webOS versions silently ignore them and always return a 960x540 JPEG."
-        ),
-    )
-    p_shot.add_argument("output", nargs="?", help="Output file path (default: screenshot-<timestamp>.<ext>)")
-    p_shot.add_argument("--width", type=int, help="Capture width (newer TVs only; older firmwares locked to 960)")
-    p_shot.add_argument("--height", type=int, help="Capture height (newer TVs only; older firmwares locked to 540)")
-    p_shot.add_argument("--format", default="JPG", help="Image format: JPG, PNG, BMP (newer TVs only; older firmwares locked to JPG)")
-    p_shot.add_argument("--method", default="DISPLAY",
-                        help="Capture method: DISPLAY, SCREEN, SCREEN_WITH_SOURCE_VIDEO, VIDEO, GRAPHIC (newer TVs only)")
+    p_shot = sub.add_parser("screenshot", help="Capture a 960x540 JPEG screenshot from the TV")
+    p_shot.add_argument("output", nargs="?", help="Output file path (default: screenshot-<timestamp>.jpg)")
 
     # Number key
     p_num = sub.add_parser("number", help="Send number key (0-9)")

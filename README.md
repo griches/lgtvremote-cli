@@ -71,9 +71,9 @@ Device data is stored in `~/.config/lgtvremote/devices.json`. This includes IP a
 | `lgtv scan` | Discover TVs, auto-add, pair, and fetch MAC addresses |
 | `lgtv add <ip>` | Add a TV by IP — auto-enriches, pairs, and fetches MACs |
 | `lgtv add <ip> --name "Living Room"` | Add with a custom name |
-| `lgtv remove <ip>` | Remove a saved TV |
+| `lgtv remove <ip-or-name>` | Remove a saved TV (by IP or name) |
 | `lgtv list` | List all saved TVs |
-| `lgtv set-default <ip>` | Set the default TV for commands |
+| `lgtv set-default <ip-or-name>` | Set the default TV for commands (by IP or name) |
 | `lgtv pair` | Re-pair with a TV (if needed) |
 | `lgtv enrich` | Re-fetch model name and MAC addresses from TV |
 
@@ -209,17 +209,9 @@ These commands use `setSystemSettings` which may not be available on older webOS
 | `lgtv subtitles` | Toggle subtitles |
 | `lgtv audio-track` | Cycle audio track |
 | `lgtv energy-saving <mode>` | Set energy saving mode (auto, off, min, med, max, screen_off) |
-| `lgtv screenshot [output]` | Capture a screenshot from the TV (saves to `screenshot-<timestamp>.jpg` by default) |
+| `lgtv screenshot [output]` | Capture a 960x540 JPEG screenshot from the TV (saves to `screenshot-<timestamp>.jpg` by default) |
 
-#### Screenshot options
-
-`--width`, `--height`, `--format` (JPG/PNG/BMP), and `--method` (DISPLAY/VIDEO/GRAPHIC/SCREEN_WITH_SOURCE_VIDEO) are supported only on newer webOS firmwares. Older TVs silently ignore these flags and always return a 960x540 JPEG regardless of what you pass.
-
-```bash
-lgtv screenshot                                      # 960x540 JPEG to cwd
-lgtv screenshot login.png --format PNG               # newer TVs only
-lgtv screenshot --width 3840 --height 2160           # 4K — newer TVs only
-```
+The SSAP screenshot endpoint is hard-locked to 960x540 JPEG on every webOS version tested (B9, CX, G5). Higher resolutions require Developer Mode or a rooted TV and calling `luna://com.webos.service.capture/executeOneShot` directly.
 
 ### Service Menus (Advanced)
 
