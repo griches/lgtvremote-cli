@@ -196,20 +196,29 @@ Send a URL to the TV to open in the built-in webOS browser.
 |---------|-------------|
 | `lgtv number <0-9>` | Send a number key press |
 
-### Display & Settings (newer TVs only)
+### Display & Settings
 
-These commands use `setSystemSettings` which may not be available on older webOS versions.
+Picture settings are written via the luna alert workaround (`luna://com.webos.settingsservice/setSystemSettings` embedded in a create/close alert round-trip) — the direct `setSystemSettings` SSAP endpoint returns "404 no such service or method" on most webOS firmware. Confirmed working on CX-era OLEDs.
 
 | Command | Description |
 |---------|-------------|
 | `lgtv screen-off` | Turn off screen (audio continues) |
 | `lgtv screen-on` | Turn screen back on |
-| `lgtv picture-mode <mode>` | Set picture mode (e.g., standard, vivid, cinema, game) |
+| `lgtv picture-mode <mode>` | Set picture mode (vivid, normal, eco, cinema, sports, game, filmMaker, expert1, expert2) |
+| `lgtv backlight [0-100]` | Set backlight level, or show the current level when omitted |
+| `lgtv brightness [0-100]` | Set brightness level, or show the current level when omitted |
+| `lgtv contrast [0-100]` | Set contrast level, or show the current level when omitted |
+| `lgtv color [0-100]` | Set picture color level, or show the current level when omitted (color button names still work, e.g. `lgtv color red`) |
+| `lgtv trumotion <mode>` | Set TruMotion motion smoothing (off, smooth, clear, user) |
+| `lgtv energy-saving <mode>` | Set energy saving mode (auto, off, min, med, max, screen_off) |
 | `lgtv sound-mode <mode>` | Set sound mode (e.g., standard, cinema, game) |
+| `lgtv sound-output <output>` | Set sound output (tv_speaker, external_arc, external_optical, bt_soundbar, headphone, lineout, tv_external_speaker, tv_speaker_headphone) |
+| `lgtv sound-output` | Show the current sound output |
 | `lgtv subtitles` | Toggle subtitles |
 | `lgtv audio-track` | Cycle audio track |
-| `lgtv energy-saving <mode>` | Set energy saving mode (auto, off, min, med, max, screen_off) |
 | `lgtv screenshot [output]` | Capture a 960x540 JPEG screenshot from the TV (saves to `screenshot-<timestamp>.jpg` by default) |
+
+Backlight, brightness, contrast, and color are the only picture values the TV exposes for reading (`ssap://settings/getSystemSettings`); other picture settings are write-only.
 
 The SSAP screenshot endpoint is hard-locked to 960x540 JPEG on every webOS version tested (B9, CX, G5). Higher resolutions require Developer Mode or a rooted TV and calling `luna://com.webos.service.capture/executeOneShot` directly.
 
@@ -241,9 +250,9 @@ lgtv raw ssap://system/getSystemInfo
 # Get software info
 lgtv raw ssap://com.webos.service.update/getCurrentSWInformation
 
-# Set a specific setting
-lgtv raw ssap://com.webos.service.settings/setSystemSettings \
-  --payload '{"category":"picture","settings":{"backlight":80}}'
+# Read picture levels (only backlight, brightness, contrast, color are readable)
+lgtv raw ssap://settings/getSystemSettings \
+  --payload '{"category":"picture","keys":["backlight","brightness"]}'
 ```
 
 ## Using with Multiple TVs

@@ -24,7 +24,7 @@ import time
 import uuid
 from typing import Any, Optional
 
-__version__ = "1.3.0"
+__version__ = "1.3.5"
 
 # ---------------------------------------------------------------------------
 # Minimal WebSocket client (RFC 6455) — no external dependencies
@@ -1063,6 +1063,67 @@ def _run_command(args, uri: str, payload: Optional[dict] = None,
         sys.exit(1)
 
 
+# --- Luna settings write (alert workaround) ---
+# ssap://com.webos.service.settings/setSystemSettings returns "404 no such
+# service or method" on most webOS firmware. The working path is to create an
+# invisible alert whose button/onclose/onfail handlers all point at the luna
+# settings service, then immediately close the alert — closing fires the
+# embedded luna call. Confirmed working on webOS CX firmware.
+_LUNA_SETTINGS_URI = "luna://com.webos.settingsservice/setSystemSettings"
+
+
+def _luna_set(ws: WebSocket, category: str, settings: dict) -> bool:
+    """Write system settings via the createAlert/closeAlert luna workaround.
+
+    Returns True if the alert round-trip succeeded (alertId received).
+    """
+    params = {"category": category, "settings": settings}
+    alert_payload = {
+        "message": " ",
+        "buttons": [{"label": "", "onClick": _LUNA_SETTINGS_URI, "params": params}],
+        "onclose": {"uri": _LUNA_SETTINGS_URI, "params": params},
+        "onfail": {"uri": _LUNA_SETTINGS_URI, "params": params},
+    }
+    resp = _send_request(ws, "ssap://system.notifications/createAlert", alert_payload)
+    alert_id = (resp or {}).get("alertId")
+    if not alert_id:
+        return False
+    _send_request(ws, "ssap://system.notifications/closeAlert", {"alertId": alert_id})
+    return True
+
+
+def _run_luna_set(args, category: str, settings: dict) -> bool:
+    """Helper to run a luna settings write against the selected TV."""
+    cfg = _load_config()
+    ip = _get_device_ip(cfg, args.tv)
+    if not ip:
+        print("Error: No TV specified and no default set. Use --tv <ip> or 'lgtv set-default <ip>'.", file=sys.stderr)
+        sys.exit(1)
+
+    device = cfg["devices"].get(ip, {})
+    client_key = device.get("client_key")
+
+    try:
+        ws, new_key = _ws_connect(ip, client_key)
+    except ConnectionError as e:
+        if "NEEDS_PIN" in str(e):
+            print("Error: TV requires pairing. Run 'lgtv pair' first.", file=sys.stderr)
+        else:
+            print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except (OSError, TimeoutError) as e:
+        print(f"Error: Could not connect to TV at {ip}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if new_key and new_key != client_key:
+        cfg["devices"].setdefault(ip, {"ip": ip, "name": ip})["client_key"] = new_key
+        _save_config(cfg)
+
+    ok = _luna_set(ws, category, settings)
+    ws.close()
+    return ok
+
+
 # --- Power ---
 def cmd_on(args):
     """Turn on the TV via Wake-on-LAN."""
@@ -1156,7 +1217,40 @@ def cmd_unmute(args):
     _run_command(args, "ssap://audio/setMute", {"mute": False})
     print("Unmuted.")
 
+# webOS rejects ssap://audio/setVolume when audio is routed to these outputs.
+# Relative volumeUp / volumeDown still work via CEC.
+_UNSUPPORTED_SETVOLUME_OUTPUTS = {
+    "external_arc",
+    "external_optical",
+    "bt_soundbar",
+    "soundbar",
+    "lineout",
+}
+
+_SOUND_OUTPUT_DISPLAY = {
+    "external_arc": "HDMI ARC",
+    "external_optical": "Optical",
+    "bt_soundbar": "Bluetooth soundbar",
+    "soundbar": "soundbar",
+    "lineout": "line out",
+}
+
+
 def cmd_set_volume(args):
+    # Query current sound output first — the LG TV silently ignores setVolume
+    # when audio is routed externally (e.g. via HDMI ARC to a Sonos), so warn
+    # the user instead of pretending the command worked.
+    status = _run_command(args, "ssap://audio/getVolume", wait_response=True)
+    if status:
+        sound_output = status.get("soundOutput") \
+            or (status.get("volumeStatus") or {}).get("soundOutput")
+        if sound_output in _UNSUPPORTED_SETVOLUME_OUTPUTS:
+            print(
+                "Error: Slider unavailable. TV audio is routed through external source.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
     _run_command(args, "ssap://audio/setVolume", {"volume": args.level})
     print(f"Volume set to {args.level}.")
 
@@ -1507,16 +1601,117 @@ def cmd_screen_off(args):
     print("Screen off (audio continues).")
 
 
+_PICTURE_MODES = ("vivid", "normal", "eco", "cinema", "sports", "game",
+                  "filmMaker", "expert1", "expert2")
+
+
 def cmd_picture_mode(args):
-    _run_command(args, "ssap://com.webos.service.settings/setSystemSettings",
-                 {"category": "picture", "settings": {"pictureMode": args.mode}})
-    print(f"Picture mode set to: {args.mode} {_SETTINGS_NOTE}")
+    # Case-insensitive match against the canonical webOS mode IDs
+    mode = {m.lower(): m for m in _PICTURE_MODES}.get(args.mode.lower())
+    if not mode:
+        print(f"Error: mode must be one of {', '.join(_PICTURE_MODES)}.", file=sys.stderr)
+        sys.exit(1)
+    if _run_luna_set(args, "picture", {"pictureMode": mode}):
+        print(f"Picture mode set to: {mode}")
+    else:
+        print("Error: TV did not accept the picture mode change.", file=sys.stderr)
+        sys.exit(1)
+
+
+# --- Picture levels (backlight/brightness/contrast/color) ---
+# These four keys are the only ones ssap://settings/getSystemSettings accepts
+# for reads in the "picture" category — other keys are rejected by the TV.
+# Values come back as strings or ints depending on firmware.
+
+def _get_picture_level(args, key: str):
+    """Read a picture level via getSystemSettings and print it."""
+    result = _run_command(args, "ssap://settings/getSystemSettings",
+                          {"category": "picture", "keys": [key]},
+                          wait_response=True)
+    value = ((result or {}).get("settings") or {}).get(key)
+    if value is None:
+        print(f"Could not get {key}.")
+        sys.exit(1)
+    print(f"{key.capitalize()}: {value}")
+
+
+def _set_picture_level(args, key: str, level: int):
+    """Set a picture level (0-100) via the luna alert workaround."""
+    if level < 0 or level > 100:
+        print(f"Error: {key} must be 0-100.", file=sys.stderr)
+        sys.exit(1)
+    if _run_luna_set(args, "picture", {key: level}):
+        print(f"{key.capitalize()} set to {level}.")
+    else:
+        print(f"Error: TV did not accept the {key} change.", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_backlight(args):
+    if args.level is None:
+        _get_picture_level(args, "backlight")
+    else:
+        _set_picture_level(args, "backlight", args.level)
+
+
+def cmd_brightness(args):
+    if args.level is None:
+        _get_picture_level(args, "brightness")
+    else:
+        _set_picture_level(args, "brightness", args.level)
+
+
+def cmd_contrast(args):
+    if args.level is None:
+        _get_picture_level(args, "contrast")
+    else:
+        _set_picture_level(args, "contrast", args.level)
+
+
+_TRUMOTION_MODES = ("off", "smooth", "clear", "user")
+
+
+def cmd_trumotion(args):
+    mode = args.mode.lower()
+    if mode not in _TRUMOTION_MODES:
+        print(f"Error: mode must be one of {', '.join(_TRUMOTION_MODES)}.", file=sys.stderr)
+        sys.exit(1)
+    if _run_luna_set(args, "picture", {"truMotionMode": mode}):
+        print(f"TruMotion set to: {mode}")
+    else:
+        print("Error: TV did not accept the TruMotion change.", file=sys.stderr)
+        sys.exit(1)
 
 
 def cmd_sound_mode(args):
     _run_command(args, "ssap://com.webos.service.settings/setSystemSettings",
                  {"category": "sound", "settings": {"soundMode": args.mode}})
     print(f"Sound mode set to: {args.mode} {_SETTINGS_NOTE}")
+
+
+_SOUND_OUTPUTS = ("tv_speaker", "external_arc", "external_optical", "bt_soundbar",
+                  "headphone", "lineout", "tv_external_speaker", "tv_speaker_headphone")
+
+
+def cmd_sound_output(args):
+    if not args.output:
+        # No output given — show the current one (reported in the volume status)
+        result = _run_command(args, "ssap://audio/getVolume", wait_response=True)
+        if result:
+            sound_output = result.get("soundOutput") \
+                or (result.get("volumeStatus") or {}).get("soundOutput", "?")
+            print(f"Sound output: {sound_output}")
+        else:
+            print("Could not get sound output info.")
+        return
+
+    output = args.output.lower()
+    if output not in _SOUND_OUTPUTS:
+        print(f"Error: output must be one of {', '.join(_SOUND_OUTPUTS)}.", file=sys.stderr)
+        sys.exit(1)
+    _run_command(args, "ssap://com.webos.service.apiadapter/audio/changeSoundOutput",
+                 {"output": output})
+    print(f"Sound output set to: {output} {_SETTINGS_NOTE}")
 
 
 def cmd_subtitles(args):
@@ -1543,9 +1738,11 @@ def cmd_energy_saving(args):
     if mode not in _ENERGY_SAVING_MODES:
         print(f"Error: mode must be one of {', '.join(_ENERGY_SAVING_MODES)}.", file=sys.stderr)
         sys.exit(1)
-    _run_command(args, "ssap://settings/setSystemSettings",
-                 {"category": "picture", "settings": {"energySaving": mode}})
-    print(f"Energy saving set to: {mode} {_SETTINGS_NOTE}")
+    if _run_luna_set(args, "picture", {"energySaving": mode}):
+        print(f"Energy saving set to: {mode}")
+    else:
+        print("Error: TV did not accept the energy saving change.", file=sys.stderr)
+        sys.exit(1)
 
 
 def cmd_screenshot(args):
@@ -1610,17 +1807,29 @@ def cmd_number(args):
         sys.exit(1)
 
 
-# --- Color buttons ---
+# --- Color buttons / picture color level ---
 def cmd_color(args):
-    """Send a color button press (red/green/yellow/blue) for teletext/HbbTV."""
+    """Color button press (red/green/yellow/blue), or get/set the picture
+    color level when given an integer 0-100 (or no argument)."""
+    # No argument — read the current picture color level
+    if args.color is None:
+        _get_picture_level(args, "color")
+        return
+
+    color = args.color.lower()
+
+    # Integer argument — set the picture color level via luna
+    if color.lstrip("-").isdigit():
+        _set_picture_level(args, "color", int(color))
+        return
+
     key_map = {
         "red": "RED", "green": "GREEN", "yellow": "YELLOW", "blue": "BLUE",
     }
 
-    color = args.color.lower()
     key = key_map.get(color)
     if not key:
-        print(f"Error: Unknown color '{color}'. Valid: red, green, yellow, blue", file=sys.stderr)
+        print(f"Error: Unknown color '{color}'. Valid: red, green, yellow, blue, or a level 0-100", file=sys.stderr)
         sys.exit(1)
 
     cfg = _load_config()
@@ -1817,6 +2026,12 @@ def build_parser() -> argparse.ArgumentParser:
               lgtv launch Netflix               # Launch app by name
               lgtv input 1                      # Switch to HDMI 1
               lgtv nav ok                       # Press OK button
+              lgtv picture-mode game            # Set picture mode
+              lgtv backlight 80                 # Set backlight level
+              lgtv brightness                   # Show current brightness
+              lgtv energy-saving off            # Set energy saving mode
+              lgtv trumotion off                # Turn off motion smoothing
+              lgtv sound-output bt_soundbar     # Route audio to BT soundbar
               lgtv play                         # Play media
               lgtv apps                         # List installed apps
               lgtv open-url https://example.com  # Open URL on TV
@@ -1912,17 +2127,36 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("screen-off", help="Turn off screen, audio continues" + _newer)
     sub.add_parser("screen-on", help="Turn screen back on" + _newer)
 
-    p_pic = sub.add_parser("picture-mode", help="Set picture mode" + _newer)
-    p_pic.add_argument("mode", help="Picture mode (e.g., standard, vivid, cinema, game)")
+    p_pic = sub.add_parser("picture-mode", help="Set picture mode")
+    p_pic.add_argument("mode", help=f"Picture mode: {', '.join(_PICTURE_MODES)}")
+
+    p_bl = sub.add_parser("backlight", help="Get or set backlight level (0-100)")
+    p_bl.add_argument("level", nargs="?", type=int, default=None,
+                      help="Level 0-100 (omit to show current)")
+
+    p_br = sub.add_parser("brightness", help="Get or set brightness level (0-100)")
+    p_br.add_argument("level", nargs="?", type=int, default=None,
+                      help="Level 0-100 (omit to show current)")
+
+    p_ct = sub.add_parser("contrast", help="Get or set contrast level (0-100)")
+    p_ct.add_argument("level", nargs="?", type=int, default=None,
+                      help="Level 0-100 (omit to show current)")
+
+    p_tm = sub.add_parser("trumotion", help="Set TruMotion motion smoothing mode")
+    p_tm.add_argument("mode", help=f"Mode: {', '.join(_TRUMOTION_MODES)}")
 
     p_snd = sub.add_parser("sound-mode", help="Set sound mode" + _newer)
     p_snd.add_argument("mode", help="Sound mode (e.g., standard, cinema, game)")
 
+    p_so = sub.add_parser("sound-output", help="Get or set sound output device" + _newer)
+    p_so.add_argument("output", nargs="?", default=None,
+                      help=f"Output: {', '.join(_SOUND_OUTPUTS)} (omit to show current)")
+
     sub.add_parser("subtitles", help="Toggle subtitles" + _newer)
     sub.add_parser("audio-track", help="Cycle audio track" + _newer)
 
-    p_eco = sub.add_parser("energy-saving", help="Set energy saving mode" + _newer)
-    p_eco.add_argument("mode", help="Mode: auto, off, min, med, max, screen_off")
+    p_eco = sub.add_parser("energy-saving", help="Set energy saving mode")
+    p_eco.add_argument("mode", help=f"Mode: {', '.join(_ENERGY_SAVING_MODES)}")
 
     p_shot = sub.add_parser("screenshot", help="Capture a 960x540 JPEG screenshot from the TV")
     p_shot.add_argument("output", nargs="?", help="Output file path (default: screenshot-<timestamp>.jpg)")
@@ -1931,9 +2165,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_num = sub.add_parser("number", help="Send number key (0-9)")
     p_num.add_argument("digit", type=int, help="Digit 0-9")
 
-    # Color buttons
-    p_color = sub.add_parser("color", help="Press a color button (red/green/yellow/blue) for teletext/HbbTV")
-    p_color.add_argument("color", help="Color: red, green, yellow, blue")
+    # Color buttons / picture color level
+    p_color = sub.add_parser("color", help="Color button (red/green/yellow/blue) or picture color level (0-100)")
+    p_color.add_argument("color", nargs="?", default=None,
+                         help="red, green, yellow, blue, or a level 0-100 (omit to show current level)")
 
     # Service menus
     p_svc = sub.add_parser("service", help="Open service/advanced menu (default password: 0413)")
@@ -1995,7 +2230,12 @@ def main():
         "screen-off": cmd_screen_off,
         "screen-on": cmd_screen_on,
         "picture-mode": cmd_picture_mode,
+        "backlight": cmd_backlight,
+        "brightness": cmd_brightness,
+        "contrast": cmd_contrast,
+        "trumotion": cmd_trumotion,
         "sound-mode": cmd_sound_mode,
+        "sound-output": cmd_sound_output,
         "subtitles": cmd_subtitles,
         "audio-track": cmd_audio_track,
         "energy-saving": cmd_energy_saving,
