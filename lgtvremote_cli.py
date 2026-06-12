@@ -1745,6 +1745,188 @@ def cmd_energy_saving(args):
         sys.exit(1)
 
 
+# --- Scenes ---
+# Named presets that apply a batch of TV settings in one command, mirroring
+# the iOS/Android apps' Scenes feature. Scenes are stored per TV in
+# devices.json. Apply order matters: input switches and picture-mode switches
+# both swap in stored picture values, so the input goes first (1.5s settle),
+# then the picture mode (1s settle), then everything else in one batched luna
+# write; sound output is unaffected by the swapping and fires immediately.
+
+def _scene_config(args):
+    """Load config and resolve the target device entry for scene commands."""
+    cfg = _load_config()
+    ip = _get_device_ip(cfg, args.tv)
+    if not ip:
+        print("Error: No TV specified and no default set. Use --tv <ip> or 'lgtv set-default <ip>'.", file=sys.stderr)
+        sys.exit(1)
+    device = cfg["devices"].setdefault(ip, {"ip": ip, "name": ip})
+    return cfg, ip, device
+
+
+def _find_scene(device: dict, name: str) -> Optional[dict]:
+    for scene in device.get("scenes", []):
+        if scene.get("name", "").lower() == name.lower():
+            return scene
+    return None
+
+
+def _scene_summary(scene: dict) -> str:
+    parts = []
+    if scene.get("input"):
+        parts.append(f"input={scene['input']}")
+    if scene.get("picture_mode"):
+        parts.append(f"picture-mode={scene['picture_mode']}")
+    for key in ("backlight", "brightness", "contrast", "color"):
+        if scene.get(key) is not None:
+            parts.append(f"{key}={scene[key]}")
+    if scene.get("energy_saving"):
+        parts.append(f"energy-saving={scene['energy_saving']}")
+    if scene.get("trumotion"):
+        parts.append(f"trumotion={scene['trumotion']}")
+    if scene.get("sound_output"):
+        parts.append(f"sound-output={scene['sound_output']}")
+    return ", ".join(parts)
+
+
+def cmd_scene_set(args):
+    """Create or replace a scene. Only the flags you pass are saved — a scene
+    only applies the settings it includes."""
+    cfg, ip, device = _scene_config(args)
+
+    scene = {"name": args.name}
+
+    if args.input:
+        scene["input"] = _resolve_input(args, args.input)
+    if args.picture_mode:
+        mode = {m.lower(): m for m in _PICTURE_MODES}.get(args.picture_mode.lower())
+        if not mode:
+            print(f"Error: picture mode must be one of {', '.join(_PICTURE_MODES)}.", file=sys.stderr)
+            sys.exit(1)
+        scene["picture_mode"] = mode
+    for key, value in (("backlight", args.backlight), ("brightness", args.brightness),
+                       ("contrast", args.contrast), ("color", args.color)):
+        if value is not None:
+            if value < 0 or value > 100:
+                print(f"Error: {key} must be 0-100.", file=sys.stderr)
+                sys.exit(1)
+            scene[key] = value
+    if args.energy_saving:
+        mode = args.energy_saving.lower()
+        if mode not in _ENERGY_SAVING_MODES:
+            print(f"Error: energy saving mode must be one of {', '.join(_ENERGY_SAVING_MODES)}.", file=sys.stderr)
+            sys.exit(1)
+        scene["energy_saving"] = mode
+    if args.trumotion:
+        mode = args.trumotion.lower()
+        if mode not in _TRUMOTION_MODES:
+            print(f"Error: trumotion mode must be one of {', '.join(_TRUMOTION_MODES)}.", file=sys.stderr)
+            sys.exit(1)
+        scene["trumotion"] = mode
+    if args.sound_output:
+        output = args.sound_output.lower()
+        if output not in _SOUND_OUTPUTS:
+            print(f"Error: sound output must be one of {', '.join(_SOUND_OUTPUTS)}.", file=sys.stderr)
+            sys.exit(1)
+        scene["sound_output"] = output
+
+    if len(scene) == 1:
+        print("Error: a scene needs at least one setting (e.g. --picture-mode cinema).", file=sys.stderr)
+        sys.exit(1)
+
+    scenes = device.setdefault("scenes", [])
+    existing = _find_scene(device, args.name)
+    if existing:
+        scenes[scenes.index(existing)] = scene
+        action = "Updated"
+    else:
+        scenes.append(scene)
+        action = "Saved"
+    _save_config(cfg)
+    print(f"{action} scene '{args.name}' for {device.get('name', ip)}: {_scene_summary(scene)}")
+
+
+def cmd_scene_list(args):
+    cfg, ip, device = _scene_config(args)
+    scenes = device.get("scenes", [])
+    if not scenes:
+        print(f"No scenes saved for {device.get('name', ip)}. Add one with 'lgtv scene set <name> ...'.")
+        return
+    for scene in scenes:
+        print(f"{scene['name']}: {_scene_summary(scene)}")
+
+
+def cmd_scene_remove(args):
+    cfg, ip, device = _scene_config(args)
+    scene = _find_scene(device, args.name)
+    if not scene:
+        print(f"Error: no scene named '{args.name}' for {device.get('name', ip)}.", file=sys.stderr)
+        sys.exit(1)
+    device["scenes"].remove(scene)
+    _save_config(cfg)
+    print(f"Removed scene '{scene['name']}'.")
+
+
+def cmd_scene_run(args):
+    """Apply a scene's settings in the order the TV needs."""
+    cfg, ip, device = _scene_config(args)
+    scene = _find_scene(device, args.name)
+    if not scene:
+        print(f"Error: no scene named '{args.name}' for {device.get('name', ip)}. "
+              f"List scenes with 'lgtv scene list'.", file=sys.stderr)
+        sys.exit(1)
+
+    client_key = device.get("client_key")
+    try:
+        ws, new_key = _ws_connect(ip, client_key)
+    except ConnectionError as e:
+        if "NEEDS_PIN" in str(e):
+            print("Error: TV requires pairing. Run 'lgtv pair' first.", file=sys.stderr)
+        else:
+            print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except (OSError, TimeoutError) as e:
+        print(f"Error: Could not connect to TV at {ip}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if new_key and new_key != client_key:
+        device["client_key"] = new_key
+        _save_config(cfg)
+
+    try:
+        settle = 0.0
+        if scene.get("input"):
+            _send_request(ws, "ssap://tv/switchInput", {"inputId": scene["input"]})
+            settle = 1.5  # input switches settle slower than mode switches
+
+        if scene.get("sound_output"):
+            _send_request(ws, "ssap://com.webos.service.apiadapter/audio/changeSoundOutput",
+                          {"output": scene["sound_output"]})
+
+        if scene.get("picture_mode"):
+            if settle:
+                time.sleep(settle)
+            _luna_set(ws, "picture", {"pictureMode": scene["picture_mode"]})
+            settle = 1.0
+
+        picture = {}
+        for key in ("backlight", "brightness", "contrast", "color"):
+            if scene.get(key) is not None:
+                picture[key] = scene[key]
+        if scene.get("energy_saving"):
+            picture["energySaving"] = scene["energy_saving"]
+        if scene.get("trumotion"):
+            picture["truMotionMode"] = scene["trumotion"]
+        if picture:
+            if settle:
+                time.sleep(settle)
+            _luna_set(ws, "picture", picture)
+    finally:
+        ws.close()
+
+    print(f"Applied scene '{scene['name']}' on {device.get('name', ip)}.")
+
+
 def cmd_screenshot(args):
     result = _run_command(args, "ssap://tv/executeOneShot", wait_response=True)
     if not result or not result.get("imageUri"):
@@ -2032,6 +2214,7 @@ def build_parser() -> argparse.ArgumentParser:
               lgtv energy-saving off            # Set energy saving mode
               lgtv trumotion off                # Turn off motion smoothing
               lgtv sound-output bt_soundbar     # Route audio to BT soundbar
+              lgtv scene run "Movie Night"      # Apply a saved scene preset
               lgtv play                         # Play media
               lgtv apps                         # List installed apps
               lgtv open-url https://example.com  # Open URL on TV
@@ -2158,6 +2341,26 @@ def build_parser() -> argparse.ArgumentParser:
     p_eco = sub.add_parser("energy-saving", help="Set energy saving mode")
     p_eco.add_argument("mode", help=f"Mode: {', '.join(_ENERGY_SAVING_MODES)}")
 
+    # Scenes — named presets applying a batch of TV settings, stored per TV
+    p_scene = sub.add_parser("scene", help="Named presets that apply a batch of TV settings in one command")
+    scene_sub = p_scene.add_subparsers(dest="scene_cmd", help="Scene command")
+    p_sc_run = scene_sub.add_parser("run", help="Apply a saved scene")
+    p_sc_run.add_argument("name", help="Scene name")
+    p_sc_set = scene_sub.add_parser("set", help="Create or replace a scene (only the flags you pass are saved)")
+    p_sc_set.add_argument("name", help="Scene name (e.g. 'Movie Night')")
+    p_sc_set.add_argument("--input", help="HDMI input to switch to first (e.g. HDMI_1, 1, or an alias)")
+    p_sc_set.add_argument("--picture-mode", help=f"Picture mode: {', '.join(_PICTURE_MODES)}")
+    p_sc_set.add_argument("--backlight", type=int, help="Backlight/OLED light 0-100")
+    p_sc_set.add_argument("--brightness", type=int, help="Brightness 0-100")
+    p_sc_set.add_argument("--contrast", type=int, help="Contrast 0-100")
+    p_sc_set.add_argument("--color", type=int, help="Color 0-100")
+    p_sc_set.add_argument("--energy-saving", help=f"Energy saving: {', '.join(_ENERGY_SAVING_MODES)}")
+    p_sc_set.add_argument("--trumotion", help=f"TruMotion: {', '.join(_TRUMOTION_MODES)}")
+    p_sc_set.add_argument("--sound-output", help=f"Sound output: {', '.join(_SOUND_OUTPUTS)}")
+    scene_sub.add_parser("list", help="List saved scenes for the selected TV")
+    p_sc_rm = scene_sub.add_parser("remove", help="Remove a saved scene")
+    p_sc_rm.add_argument("name", help="Scene name")
+
     p_shot = sub.add_parser("screenshot", help="Capture a 960x540 JPEG screenshot from the TV")
     p_shot.add_argument("output", nargs="?", help="Output file path (default: screenshot-<timestamp>.jpg)")
 
@@ -2267,6 +2470,19 @@ def main():
         if not args.ch_cmd:
             parser.parse_args(["channel", "--help"])
         ch_handlers[args.ch_cmd](args)
+        return
+
+    # Scene subcommands
+    if args.command == "scene":
+        scene_handlers = {
+            "run": cmd_scene_run,
+            "set": cmd_scene_set,
+            "list": cmd_scene_list,
+            "remove": cmd_scene_remove,
+        }
+        if not args.scene_cmd:
+            parser.parse_args(["scene", "--help"])
+        scene_handlers[args.scene_cmd](args)
         return
 
     handler = handlers.get(args.command)

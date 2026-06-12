@@ -220,6 +220,24 @@ Picture settings are written via the luna alert workaround (`luna://com.webos.se
 
 Backlight, brightness, contrast, and color are the only picture values the TV exposes for reading (`ssap://settings/getSystemSettings`); other picture settings are write-only.
 
+### Scenes
+
+Scenes are named presets — like "Movie Night" or "Gaming" — that apply a batch of TV settings in one command. A scene only applies the settings you save into it, and scenes are stored per TV (in `~/.config/lgtvremote/devices.json`).
+
+| Command | Description |
+|---------|-------------|
+| `lgtv scene run <name>` | Apply a saved scene |
+| `lgtv scene set <name> [flags]` | Create or replace a scene. Flags: `--input`, `--picture-mode`, `--backlight`, `--brightness`, `--contrast`, `--color`, `--energy-saving`, `--trumotion`, `--sound-output` |
+| `lgtv scene list` | List saved scenes for the selected TV |
+| `lgtv scene remove <name>` | Remove a saved scene |
+
+```sh
+lgtv scene set "Movie Night" --input 2 --picture-mode cinema --backlight 30 --energy-saving off --sound-output external_arc
+lgtv scene run "Movie Night"
+```
+
+Apply order matters and is handled automatically: the HDMI input switches first (then a ~1.5s settle — input switches swap in stored picture values), then the picture mode (~1s settle, same reason), then everything else in one batched luna write. Sound output is unaffected by the value swapping and fires immediately.
+
 The SSAP screenshot endpoint is hard-locked to 960x540 JPEG on every webOS version tested (B9, CX, G5). Higher resolutions require Developer Mode or a rooted TV and calling `luna://com.webos.service.capture/executeOneShot` directly.
 
 ### Service Menus (Advanced)
