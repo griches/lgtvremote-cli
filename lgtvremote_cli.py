@@ -24,7 +24,7 @@ import time
 import uuid
 from typing import Any, Optional
 
-__version__ = "1.3.5"
+__version__ = "1.4.0"
 
 # ---------------------------------------------------------------------------
 # Minimal WebSocket client (RFC 6455) — no external dependencies
