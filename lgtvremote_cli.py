@@ -24,7 +24,7 @@ import time
 import uuid
 from typing import Any, Optional
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 # ---------------------------------------------------------------------------
 # Minimal WebSocket client (RFC 6455) — no external dependencies
@@ -1072,17 +1072,17 @@ def _run_command(args, uri: str, payload: Optional[dict] = None,
 _LUNA_SETTINGS_URI = "luna://com.webos.settingsservice/setSystemSettings"
 
 
-def _luna_set(ws: WebSocket, category: str, settings: dict) -> bool:
-    """Write system settings via the createAlert/closeAlert luna workaround.
+def _luna_call(ws: WebSocket, uri: str, params: dict) -> bool:
+    """Invoke any internal luna:// endpoint via the alert workaround.
 
     Returns True if the alert round-trip succeeded (alertId received).
+    Write-only: the luna call's own result never comes back.
     """
-    params = {"category": category, "settings": settings}
     alert_payload = {
         "message": " ",
-        "buttons": [{"label": "", "onClick": _LUNA_SETTINGS_URI, "params": params}],
-        "onclose": {"uri": _LUNA_SETTINGS_URI, "params": params},
-        "onfail": {"uri": _LUNA_SETTINGS_URI, "params": params},
+        "buttons": [{"label": "", "onClick": uri, "params": params}],
+        "onclose": {"uri": uri, "params": params},
+        "onfail": {"uri": uri, "params": params},
     }
     resp = _send_request(ws, "ssap://system.notifications/createAlert", alert_payload)
     alert_id = (resp or {}).get("alertId")
@@ -1092,8 +1092,13 @@ def _luna_set(ws: WebSocket, category: str, settings: dict) -> bool:
     return True
 
 
-def _run_luna_set(args, category: str, settings: dict) -> bool:
-    """Helper to run a luna settings write against the selected TV."""
+def _luna_set(ws: WebSocket, category: str, settings: dict) -> bool:
+    """Write system settings via the createAlert/closeAlert luna workaround."""
+    return _luna_call(ws, _LUNA_SETTINGS_URI, {"category": category, "settings": settings})
+
+
+def _run_luna_calls(args, calls: list) -> bool:
+    """Run one or more (uri, params) luna calls over a single connection."""
     cfg = _load_config()
     ip = _get_device_ip(cfg, args.tv)
     if not ip:
@@ -1119,9 +1124,16 @@ def _run_luna_set(args, category: str, settings: dict) -> bool:
         cfg["devices"].setdefault(ip, {"ip": ip, "name": ip})["client_key"] = new_key
         _save_config(cfg)
 
-    ok = _luna_set(ws, category, settings)
+    ok = all(_luna_call(ws, uri, params) for uri, params in calls)
     ws.close()
     return ok
+
+
+def _run_luna_set(args, category: str, settings: dict) -> bool:
+    """Helper to run a luna settings write against the selected TV."""
+    return _run_luna_calls(
+        args, [(_LUNA_SETTINGS_URI, {"category": category, "settings": settings})]
+    )
 
 
 # --- Power ---
@@ -1745,6 +1757,45 @@ def cmd_energy_saving(args):
         sys.exit(1)
 
 
+# --- Panel auto-dimming (TPC / GSR) ---
+# OLED models from 2020 (webOS 5) expose com.webos.service.oledepl; the calls
+# are silent no-ops on older models and LCDs. The TV restores both protections
+# after a power cycle, so re-run after powering the TV back on. Same endpoints
+# bscpylgtv and ColorControl use.
+_LUNA_TPC_URI = "luna://com.webos.service.oledepl/setTemporalPeakControl"
+_LUNA_GSR_URI = "luna://com.webos.service.oledepl/setGlobalStressReduction"
+
+
+def cmd_dimming(args):
+    state = args.state.lower()
+    if state not in ("on", "off"):
+        print("Error: state must be 'on' or 'off'.", file=sys.stderr)
+        sys.exit(1)
+    enable = state == "on"
+
+    # Default to both unless the user singled one out
+    do_tpc = args.tpc or not args.gsr
+    do_gsr = args.gsr or not args.tpc
+
+    calls = []
+    if do_tpc:
+        calls.append((_LUNA_TPC_URI, {"enable": enable}))
+    if do_gsr:
+        calls.append((_LUNA_GSR_URI, {"enable": enable}))
+
+    if _run_luna_calls(args, calls):
+        which = "TPC and GSR" if do_tpc and do_gsr else ("TPC" if do_tpc else "GSR")
+        print(f"Panel auto-dimming ({which}) {'enabled' if enable else 'disabled'}.")
+        if not enable:
+            print("Note: the TV restores dimming after a power cycle — re-run this "
+                  "command after powering the TV back on. Increases burn-in risk "
+                  "while static content stays on screen.")
+    else:
+        print("Error: TV did not accept the dimming change (needs a 2020+ LG OLED).",
+              file=sys.stderr)
+        sys.exit(1)
+
+
 # --- Scenes ---
 # Named presets that apply a batch of TV settings in one command, mirroring
 # the iOS/Android apps' Scenes feature. Scenes are stored per TV in
@@ -2212,6 +2263,7 @@ def build_parser() -> argparse.ArgumentParser:
               lgtv backlight 80                 # Set backlight level
               lgtv brightness                   # Show current brightness
               lgtv energy-saving off            # Set energy saving mode
+              lgtv dimming off                  # Disable OLED auto-dimming (TPC+GSR)
               lgtv trumotion off                # Turn off motion smoothing
               lgtv sound-output bt_soundbar     # Route audio to BT soundbar
               lgtv scene run "Movie Night"      # Apply a saved scene preset
@@ -2341,6 +2393,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_eco = sub.add_parser("energy-saving", help="Set energy saving mode")
     p_eco.add_argument("mode", help=f"Mode: {', '.join(_ENERGY_SAVING_MODES)}")
 
+    p_dim = sub.add_parser(
+        "dimming",
+        help="Toggle OLED panel auto-dimming (TPC/GSR) — 2020+ OLED models",
+        description="Disable or restore the OLED panel's automatic dimming: TPC "
+                    "(dims static scenes over time) and GSR (dims static logos/HUDs). "
+                    "Disabling keeps full brightness at the cost of reduced burn-in "
+                    "protection; the TV restores both after a power cycle.")
+    p_dim.add_argument("state", help="'off' to disable dimming, 'on' to restore it")
+    p_dim.add_argument("--tpc", action="store_true", help="Only change TPC")
+    p_dim.add_argument("--gsr", action="store_true", help="Only change GSR")
+
     # Scenes — named presets applying a batch of TV settings, stored per TV
     p_scene = sub.add_parser("scene", help="Named presets that apply a batch of TV settings in one command")
     scene_sub = p_scene.add_subparsers(dest="scene_cmd", help="Scene command")
@@ -2442,6 +2505,7 @@ def main():
         "subtitles": cmd_subtitles,
         "audio-track": cmd_audio_track,
         "energy-saving": cmd_energy_saving,
+        "dimming": cmd_dimming,
         "screenshot": cmd_screenshot,
     }
 

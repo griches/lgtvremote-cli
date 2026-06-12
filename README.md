@@ -211,6 +211,7 @@ Picture settings are written via the luna alert workaround (`luna://com.webos.se
 | `lgtv color [0-100]` | Set picture color level, or show the current level when omitted (color button names still work, e.g. `lgtv color red`) |
 | `lgtv trumotion <mode>` | Set TruMotion motion smoothing (off, smooth, clear, user) |
 | `lgtv energy-saving <mode>` | Set energy saving mode (auto, off, min, med, max, screen_off) |
+| `lgtv dimming <on\|off>` | Restore or disable OLED panel auto-dimming — TPC (static scenes) and GSR (static logos/HUDs). 2020+ OLED models only; the TV restores both after a power cycle. `--tpc` / `--gsr` to change just one. Disabling reduces burn-in protection. |
 | `lgtv sound-mode <mode>` | Set sound mode (e.g., standard, cinema, game) |
 | `lgtv sound-output <output>` | Set sound output (tv_speaker, external_arc, external_optical, bt_soundbar, headphone, lineout, tv_external_speaker, tv_speaker_headphone) |
 | `lgtv sound-output` | Show the current sound output |
