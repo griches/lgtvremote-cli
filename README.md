@@ -84,7 +84,7 @@ Device data is stored in `~/.config/lgtvremote/devices.json`. This includes IP a
 | `lgtv on` | Turn on TV via Wake-on-LAN (requires stored MAC address) |
 | `lgtv off` | Turn off TV |
 | `lgtv power` | Toggle power (off via WebSocket, on via WOL if unreachable) |
-| `lgtv power-status` | Check if TV is on or off (JSON output, exit code 1 if off/unreachable) |
+| `lgtv power-status` | Report real power state: `on`, `standby` (Quick Start+ socket up, panel off), or `off` (JSON output incl. the TV's raw `state`; exit code 0 only when on) |
 
 ### Volume
 

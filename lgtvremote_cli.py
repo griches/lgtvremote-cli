@@ -1191,7 +1191,13 @@ def cmd_power(args):
 
 
 def cmd_power_status(args):
-    """Check if the TV is on or off by attempting a WebSocket connection."""
+    """Report the TV's real power state: on, standby, or off.
+
+    Quick Start+ TVs accept WebSocket connections while the panel is off, so a
+    successful connect alone can't distinguish on from standby — ask
+    getPowerState and report what the TV says. Exit code 0 only when the panel
+    is actually on.
+    """
     cfg = _load_config()
     ip = _get_device_ip(cfg, args.tv)
     if not ip:
@@ -1203,12 +1209,30 @@ def cmd_power_status(args):
 
     try:
         ws, _ = _ws_connect(ip, client_key, timeout=3.0)
-        ws.close()
-        status = {"power": "on", "ip": ip, "name": device.get("name", ip)}
-        print(json.dumps(status))
     except (ConnectionError, OSError, TimeoutError):
         status = {"power": "off", "ip": ip, "name": device.get("name", ip)}
         print(json.dumps(status))
+        sys.exit(1)
+
+    try:
+        resp = _send_request(
+            ws, "ssap://com.webos.service.tvpower/power/getPowerState"
+        )
+    finally:
+        ws.close()
+
+    state = (resp or {}).get("state", "")
+    if state in ("Standby", "Active Standby", "Suspend"):
+        power = "standby"
+    else:
+        # "Active", plus unknown states (e.g. Screen Off's audio-only mode) —
+        # the socket answered and the TV didn't say standby, so call it on.
+        power = "on"
+    status = {"power": power, "ip": ip, "name": device.get("name", ip)}
+    if state:
+        status["state"] = state
+    print(json.dumps(status))
+    if power != "on":
         sys.exit(1)
 
 
@@ -2304,7 +2328,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("on", help="Turn on TV (Wake-on-LAN)")
     sub.add_parser("off", help="Turn off TV")
     sub.add_parser("power", help="Toggle TV power")
-    sub.add_parser("power-status", help="Check if TV is on or off (JSON output)")
+    sub.add_parser(
+        "power-status",
+        help="Report real power state: on, standby, or off (JSON output)",
+    )
 
     # Volume
     vol = sub.add_parser("volume", help="Volume control")
