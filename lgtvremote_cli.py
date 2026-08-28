@@ -25,7 +25,7 @@ import urllib.parse
 import uuid
 from typing import Any, Optional
 
-__version__ = "1.5.0"
+__version__ = "1.6.0"
 
 # ---------------------------------------------------------------------------
 # Minimal WebSocket client (RFC 6455) — no external dependencies
