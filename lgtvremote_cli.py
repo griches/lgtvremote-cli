@@ -21,6 +21,7 @@ import ssl
 import sys
 import textwrap
 import time
+import urllib.parse
 import uuid
 from typing import Any, Optional
 
@@ -1628,13 +1629,136 @@ def cmd_app(args):
         print("Could not get foreground app info.")
 
 
+# --- YouTube deep link ---
+# Port of the iOS PlayYouTubeVideoIntent (c4bc23f). Accepts a full watch URL,
+# a youtu.be short link, a Shorts/live/embed link, or a bare 11-character id,
+# and launches the YouTube app directly on that video via the leanback URL —
+# unlike open-url, which leaves the routing to webOS.
+_YT_ID_CHARS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")
+
+
+def _is_youtube_video_id(candidate: str) -> bool:
+    """YouTube ids are exactly 11 base64url characters."""
+    return len(candidate) == 11 and all(c in _YT_ID_CHARS for c in candidate)
+
+
+def _youtube_video_id(text: str) -> Optional[str]:
+    """Pull the video id out of whatever the user hands over."""
+    trimmed = text.strip()
+    if not trimmed:
+        return None
+    if _is_youtube_video_id(trimmed):
+        return trimmed
+
+    # urlsplit needs a scheme; pasted links often arrive without one.
+    normalized = trimmed if "://" in trimmed else "https://" + trimmed
+    parts = urllib.parse.urlsplit(normalized)
+    host = (parts.hostname or "").lower()
+    if host not in ("youtu.be", "youtube.com") and not host.endswith(".youtube.com"):
+        return None
+
+    query = urllib.parse.parse_qs(parts.query)
+    for v in query.get("v", []):
+        if _is_youtube_video_id(v):
+            return v
+
+    path = [p for p in parts.path.split("/") if p]
+    if host == "youtu.be" and path and _is_youtube_video_id(path[0]):
+        return path[0]
+    if (len(path) >= 2 and path[0].lower() in ("shorts", "live", "embed", "v")
+            and _is_youtube_video_id(path[1])):
+        return path[1]
+    return None
+
+
+def cmd_youtube(args):
+    """Open a specific YouTube video on the TV."""
+    video_id = _youtube_video_id(args.video)
+    if not video_id:
+        print("Error: Could not find a YouTube video id in that. Pass a watch URL, "
+              "a youtu.be/Shorts/live link, or the 11-character video id.",
+              file=sys.stderr)
+        sys.exit(1)
+    _run_command(args, "ssap://system.launcher/launch", {
+        "id": "youtube.leanback.v4",
+        "params": {"contentTarget": f"https://www.youtube.com/tv?v={video_id}"},
+    })
+    print(f"Playing YouTube video {video_id} on the TV.")
+
+
 # --- Display/Settings (newer TVs only) ---
 _SETTINGS_NOTE = "(may not work on older TVs)"
 
 
+def _screen_off_with_fallback(args) -> bool:
+    """Blank the panel, audio left on.
+
+    tvpower/turnOffScreen is the real endpoint but older firmware doesn't have
+    the service — those sets reach the same panel-off state via the luna
+    energy-saving screen_off write, the identical fallback iOS uses.
+    """
+    result = _run_command(args, "ssap://com.webos.service.tvpower/power/turnOffScreen",
+                          wait_response=True)
+    if result and result.get("returnValue"):
+        return True
+    return _run_luna_set(args, "picture", {"energySaving": "screen_off"})
+
+
 def cmd_screen_off(args):
-    _run_command(args, "ssap://com.webos.service.tvpower/power/turnOffScreen")
-    print("Screen off (audio continues).")
+    if _screen_off_with_fallback(args):
+        print("Screen off (audio continues).")
+    else:
+        print("Error: TV did not accept the screen-off command.", file=sys.stderr)
+        sys.exit(1)
+
+
+def _parse_sleep_duration(text: str) -> Optional[int]:
+    """'30' or '30m' -> 1800, '90s' -> 90, '1h' -> 3600, '1h30m' -> 5400."""
+    spec = text.strip().lower()
+    if spec.isdigit():
+        return int(spec) * 60 or None
+    total, number = 0, ""
+    for ch in spec:
+        if ch.isdigit():
+            number += ch
+        elif ch in "hms" and number:
+            total += int(number) * {"h": 3600, "m": 60, "s": 1}[ch]
+            number = ""
+        else:
+            return None
+    if number:  # trailing bare number after a unit, e.g. "1h30"
+        total += int(number) * 60
+    return total or None
+
+
+def cmd_screen_sleep(args):
+    """Screen Sleep: blank the panel after a delay, keeping the audio on.
+
+    Port of the apps' Screen Sleep feature — fall asleep to a programme, or
+    run a music channel without the panel lit. The countdown runs in this
+    process; Ctrl-C cancels it and the screen stays on.
+    """
+    seconds = _parse_sleep_duration(args.duration)
+    if not seconds:
+        print("Error: duration must be like 30, 45m, 90s or 1h30m.", file=sys.stderr)
+        sys.exit(1)
+
+    fire_at = time.strftime("%H:%M", time.localtime(time.time() + seconds))
+    minutes = round(seconds / 60)
+    print(f"Screen off at {fire_at} (in {minutes} minute{'s' if minutes != 1 else ''}), "
+          "audio stays on. Ctrl-C to cancel.")
+    try:
+        time.sleep(seconds)
+    except KeyboardInterrupt:
+        print("\nCancelled — screen stays on.")
+        sys.exit(0)
+
+    if _screen_off_with_fallback(args):
+        print("Screen off (audio continues). 'lgtv screen-on' wakes it.")
+    else:
+        print("Error: TV did not accept the screen-off command.", file=sys.stderr)
+        sys.exit(1)
 
 
 _PICTURE_MODES = ("vivid", "normal", "eco", "cinema", "sports", "game",
@@ -2265,6 +2389,168 @@ def cmd_raw(args):
 
 
 # ---------------------------------------------------------------------------
+# TV Self-Test — port of the apps' field-diagnostics sweep (iOS ae3b001)
+# ---------------------------------------------------------------------------
+# Drives a full command sweep against the live TV and records what actually
+# responds — for diagnosing TVs we don't own. Scope rules match the apps:
+#   - Writes that would persistently alter the TV's setup (picture/sound/
+#     energy settings) are recorded as skipped, not fired.
+#   - Disruptive-but-transient commands (volume, mute, media keys) run as-is;
+#     nothing is restored afterwards.
+#   - Power runs strictly LAST: off, pause, then back on via Wake-on-LAN,
+#     and the cycle is proven by reconnecting, not assumed.
+# "Passed" means the TV acknowledged the command (returnValue true) —
+# it does not prove the TV visibly reacted.
+
+def _self_test_power_cycle(ip: str, device: dict, record) -> None:
+    """Off, pause, WoL on, then prove the TV came back by reconnecting."""
+    macs = [m for m in (device.get("mac"), device.get("wifi_mac")) if m]
+    if not macs:
+        record("Power: cycle", "skipped", None, "no MAC stored — run 'lgtv enrich'")
+        return
+
+    client_key = device.get("client_key")
+    try:
+        ws, _ = _ws_connect(ip, client_key, timeout=5.0)
+        start = time.monotonic()
+        resp = _send_request(ws, "ssap://system/turnOff")
+        ws.close()
+        ok = bool(resp and resp.get("returnValue"))
+        record("Power: off", "passed" if ok else "failed",
+               int((time.monotonic() - start) * 1000), None)
+        if not ok:
+            return
+    except (ConnectionError, OSError, TimeoutError):
+        record("Power: off", "failed", None, None)
+        return
+
+    print("  … TV off, waiting 8s before waking it")
+    time.sleep(8)
+    for mac in macs:
+        _send_wol(mac, ip)
+    record("Power: Wake-on-LAN sent", "fired", None, None)
+
+    # Quick Start+ sets come back in seconds; a cold boot takes ~30s.
+    start = time.monotonic()
+    deadline = start + 60
+    while time.monotonic() < deadline:
+        try:
+            ws, _ = _ws_connect(ip, client_key, timeout=3.0)
+            ws.close()
+            record("Power: back on (reconnected)", "passed",
+                   int((time.monotonic() - start) * 1000), None)
+            return
+        except (ConnectionError, OSError, TimeoutError):
+            time.sleep(3)
+    record("Power: back on (reconnected)", "failed", None,
+           "no reconnect within 60s — check Quick Start+ / WoL settings")
+
+
+def cmd_self_test(args):
+    """Run the full command sweep and print a pass/fail report."""
+    cfg = _load_config()
+    ip = _get_device_ip(cfg, args.tv)
+    if not ip:
+        print("Error: No TV specified and no default set.", file=sys.stderr)
+        sys.exit(1)
+    device = cfg["devices"].get(ip, {})
+
+    results = []  # (name, outcome, latency_ms, note)
+    marks = {"passed": "✅", "failed": "❌", "fired": "➤ ", "skipped": "⏭ "}
+
+    def record(name, outcome, latency_ms, note):
+        results.append((name, outcome, latency_ms, note))
+        latency = f" ({latency_ms} ms)" if latency_ms is not None else ""
+        suffix = f" — {note}" if note else ""
+        print(f"  {marks[outcome]} {name}{latency}{suffix}")
+
+    print(f"TV Self-Test: {device.get('name', ip)} ({ip})")
+    print("Passed = the TV acknowledged the command, not that it visibly reacted.\n")
+
+    try:
+        ws, new_key = _ws_connect(ip, device.get("client_key"))
+    except ConnectionError as e:
+        if "NEEDS_PIN" in str(e):
+            print("Error: TV requires pairing. Run 'lgtv pair' first.", file=sys.stderr)
+        else:
+            print(f"  {marks['failed']} Connection check — {e}")
+        sys.exit(1)
+    except (OSError, TimeoutError) as e:
+        print(f"  {marks['failed']} Connection check — {e}")
+        sys.exit(1)
+    if new_key and new_key != device.get("client_key"):
+        cfg["devices"].setdefault(ip, {"ip": ip, "name": ip})["client_key"] = new_key
+        _save_config(cfg)
+    record("Connection check", "passed", 0, None)
+
+    def step(name, uri, payload=None):
+        start = time.monotonic()
+        resp = _send_request(ws, uri, payload)
+        ms = int((time.monotonic() - start) * 1000)
+        if resp is None:
+            record(name, "failed", None, "no response")
+        elif resp.get("returnValue"):
+            record(name, "passed", ms, None)
+        else:
+            record(name, "failed", ms, resp.get("errorText"))
+        time.sleep(0.6)  # don't flood the TV; a human can follow along
+
+    # -- State reads --
+    step("Read: volume state", "ssap://audio/getVolume")
+    step("Read: input list", "ssap://tv/getExternalInputList")
+    step("Read: app list", "ssap://com.webos.applicationManager/listApps")
+    step("Read: channel list", "ssap://tv/getChannelList")
+    step("Read: foreground app", "ssap://com.webos.applicationManager/getForegroundAppInfo")
+    step("Read: power state", "ssap://com.webos.service.tvpower/power/getPowerState")
+
+    # -- Navigation (pointer input socket) --
+    start = time.monotonic()
+    resp = _send_request(ws, "ssap://com.webos.service.networkinput/getPointerInputSocket")
+    sock_path = (resp or {}).get("socketPath")
+    if sock_path:
+        record("Nav: pointer socket", "passed",
+               int((time.monotonic() - start) * 1000), None)
+        try:
+            pointer_ws = WebSocket.connect(sock_path, timeout=5)
+            for key in ("UP", "DOWN", "BACK"):
+                pointer_ws.send(f"type:button\nname:{key}\n\n")
+                record(f"Nav: {key}", "fired", None, None)
+                time.sleep(0.6)
+            pointer_ws.close()
+        except (ConnectionError, OSError, TimeoutError) as e:
+            record("Nav: button send", "failed", None, str(e))
+    else:
+        record("Nav: pointer socket", "failed", None, None)
+
+    # -- Transient commands (not restored afterwards) --
+    step("Volume up", "ssap://audio/volumeUp")
+    step("Volume down", "ssap://audio/volumeDown")
+    step("Mute on", "ssap://audio/setMute", {"mute": True})
+    step("Mute off", "ssap://audio/setMute", {"mute": False})
+    step("Media: play", "ssap://media.controls/play")
+    step("Media: pause", "ssap://media.controls/pause")
+
+    # -- Persistent writes are out of scope, same as the apps --
+    for name in ("picture settings", "sound settings", "energy saving", "screen off"):
+        record(f"Write: {name}", "skipped", None, "would alter the TV's setup")
+
+    ws.close()
+
+    # -- Power strictly last --
+    if args.skip_power:
+        record("Power: cycle", "skipped", None, "--skip-power")
+    else:
+        _self_test_power_cycle(ip, device, record)
+
+    failed = sum(1 for _, outcome, _, _ in results if outcome == "failed")
+    passed = sum(1 for _, outcome, _, _ in results if outcome == "passed")
+    print(f"\n{passed} passed, {failed} failed, "
+          f"{len(results) - passed - failed} fired/skipped.")
+    if failed:
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
 # CLI argument parser
 # ---------------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
@@ -2293,6 +2579,9 @@ def build_parser() -> argparse.ArgumentParser:
               lgtv scene run "Movie Night"      # Apply a saved scene preset
               lgtv play                         # Play media
               lgtv apps                         # List installed apps
+              lgtv youtube https://youtu.be/ID  # Open a YouTube video on the TV
+              lgtv screen-sleep 30              # Screen off in 30 min, audio stays on
+              lgtv self-test                    # Sweep commands, report what responds
               lgtv open-url https://example.com  # Open URL on TV
               lgtv raw ssap://system/turnOff    # Send raw SSAP command
         """),
@@ -2384,10 +2673,16 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("apps", help="List installed apps")
     sub.add_parser("app", help="Show currently running app")
 
+    p_yt = sub.add_parser("youtube", help="Open a specific YouTube video on the TV")
+    p_yt.add_argument("video", help="YouTube link (watch/youtu.be/Shorts/live) or 11-char video id")
+
     # Display/Settings (newer TVs only)
     _newer = " (newer TVs only)"
     sub.add_parser("screen-off", help="Turn off screen, audio continues" + _newer)
     sub.add_parser("screen-on", help="Turn screen back on" + _newer)
+    p_sleep = sub.add_parser("screen-sleep",
+                             help="Turn the screen off after a delay, audio continues (Ctrl-C cancels)")
+    p_sleep.add_argument("duration", help="Delay: 30 (minutes), 45m, 90s or 1h30m")
 
     p_pic = sub.add_parser("picture-mode", help="Set picture mode")
     p_pic.add_argument("mode", help=f"Picture mode: {', '.join(_PICTURE_MODES)}")
@@ -2454,6 +2749,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_shot = sub.add_parser("screenshot", help="Capture a 960x540 JPEG screenshot from the TV")
     p_shot.add_argument("output", nargs="?", help="Output file path (default: screenshot-<timestamp>.jpg)")
 
+    p_st = sub.add_parser("self-test",
+                          help="Sweep every safe command against the TV and report what responds")
+    p_st.add_argument("--skip-power", action="store_true",
+                      help="Skip the final power off/on cycle")
+
     # Number key
     p_num = sub.add_parser("number", help="Send number key (0-9)")
     p_num.add_argument("digit", type=int, help="Digit 0-9")
@@ -2514,6 +2814,7 @@ def main():
         "launch": cmd_launch,
         "apps": cmd_apps,
         "app": cmd_app,
+        "youtube": cmd_youtube,
         "number": cmd_number,
         "color": cmd_color,
         "service": cmd_service,
@@ -2522,6 +2823,8 @@ def main():
         "nav": cmd_nav,
         "screen-off": cmd_screen_off,
         "screen-on": cmd_screen_on,
+        "screen-sleep": cmd_screen_sleep,
+        "self-test": cmd_self_test,
         "picture-mode": cmd_picture_mode,
         "backlight": cmd_backlight,
         "brightness": cmd_brightness,

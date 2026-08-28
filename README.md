@@ -160,6 +160,7 @@ Launch any app by its display name — matches against what's installed on your 
 | `lgtv launch <app-id>` | Launch by webOS app ID |
 | `lgtv apps` | List all installed apps with their IDs |
 | `lgtv app` | Show currently running foreground app |
+| `lgtv youtube <link-or-id>` | Open a specific YouTube video on the TV — takes a watch URL, youtu.be short link, Shorts/live link, or the bare 11-character video id |
 
 #### Supported App Shortcuts
 
@@ -202,8 +203,9 @@ Picture settings are written via the luna alert workaround (`luna://com.webos.se
 
 | Command | Description |
 |---------|-------------|
-| `lgtv screen-off` | Turn off screen (audio continues) |
+| `lgtv screen-off` | Turn off screen (audio continues). Falls back to the energy-saving `screen_off` write on older sets without the tvpower service |
 | `lgtv screen-on` | Turn screen back on |
+| `lgtv screen-sleep <duration>` | Screen Sleep: blank the panel after a delay with the audio left on — fall asleep to a programme, or run a music channel unlit. Duration like `30` (minutes), `45m`, `90s`, `1h30m`; the countdown runs in the terminal and Ctrl-C cancels it |
 | `lgtv picture-mode <mode>` | Set picture mode (vivid, normal, eco, cinema, sports, game, filmMaker, expert1, expert2) |
 | `lgtv backlight [0-100]` | Set backlight level, or show the current level when omitted |
 | `lgtv brightness [0-100]` | Set brightness level, or show the current level when omitted |
@@ -302,6 +304,22 @@ Key patterns:
 - `lgtv apps` and `lgtv inputs` list available options with IDs
 - `lgtv raw` allows sending any SSAP command for capabilities not covered by named commands
 
+## Diagnostics
+
+### TV Self-Test
+
+`lgtv self-test` sweeps every safe command against the TV and reports what actually responds, with per-command latency — useful when a TV misbehaves and you want a shareable picture of what works and what doesn't.
+
+- **Passed** means the TV acknowledged the command, not that it visibly reacted.
+- Reads and transient commands (volume, mute, media keys) run as-is; nothing is restored afterwards.
+- Writes that would persistently alter the TV's setup (picture, sound, energy settings) are recorded as skipped, never fired.
+- Power runs strictly last: off, an 8-second pause, then Wake-on-LAN — and the cycle is proven by reconnecting, not assumed. Pass `--skip-power` to leave the TV on.
+
+```bash
+lgtv self-test                 # full sweep including the power cycle
+lgtv self-test --skip-power    # everything except the power cycle
+```
+
 ## Network Requirements
 
 - Your computer and TV must be on the same local network
@@ -309,6 +327,14 @@ Key patterns:
 - Port 3000 (HTTP) is used for device discovery enrichment
 - Port 1900 (UDP) is used for SSDP discovery
 - Ports 7 and 9 (UDP broadcast) are used for Wake-on-LAN
+
+## Troubleshooting
+
+### The TV stops answering on ports 3000/3001 (e.g. after Hotel Mode)
+
+If Hotel Mode has been switched on — or the TV's control daemon is otherwise wedged — the TV can accept TCP connections on ports 3000/3001 but never answer the SSAP handshake, so every command times out.
+
+Turning Hotel Mode off in the installation menu (hold the Settings button on LG's remote ~5 seconds, then blind-enter `1105`, `0413` or `1111`) is **not enough on its own**. With Quick Start+ enabled the power button never cold-boots webOS, so the wedged daemon survives a normal off/on. Unplug the TV from the mains for a minute, then power it back up — control returns and no re-pairing is needed.
 
 ## License
 
