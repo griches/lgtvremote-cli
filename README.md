@@ -340,7 +340,7 @@ Turning Hotel Mode off in the installation menu (hold the Settings button on LG'
 
 MIT
 
-### Newer LG firmware (1.6.1)
+### Newer LG firmware (1.6.2)
 
 Connections retain the original signed registration for existing TVs. If newer webOS firmware rejects its certificate or leaves registration unanswered, the CLI retries once using the full unsigned permission set. It remembers the successful mode per TV. This applies to every command, including keyboard input, navigation/number/colour keys, app launching, scenes, advanced settings, raw requests and self-test.
 

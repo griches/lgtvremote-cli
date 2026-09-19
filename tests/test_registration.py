@@ -1,6 +1,7 @@
 import json
 import socket
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -139,6 +140,50 @@ class RegistrationTests(unittest.TestCase):
                 cli._ws_connect("192.0.2.1", "saved", cfg=self.cfg)
             self.assertEqual(2, connect.call_count)
         self.assertTrue(first.closed and second.closed)
+
+    def test_real_websocket_frames_recover_then_deliver_commands(self):
+        pairs = [socket.socketpair(), socket.socketpair()]
+        clients = [cli.WebSocket(pair[0]) for pair in pairs]
+        servers = [cli.WebSocket(pair[1]) for pair in pairs]
+        received, failures = [], []
+        def television():
+            try:
+                for index, ws in enumerate(servers):
+                    registration = json.loads(ws.recv(timeout=2))
+                    received.append(registration)
+                    ws.send(json.dumps({"type": "hello", "payload": {"protocolVersion": 2}}))
+                    if index == 0:
+                        ws.send(json.dumps({"type": "error", "id": registration["id"], "error": cli.BLACKLISTED_CERTIFICATE}))
+                    else:
+                        ws.send(json.dumps({"type": "registered", "id": registration["id"], "payload": {"client-key": "wire-key"}}))
+                        for _ in range(3):
+                            request = json.loads(ws.recv(timeout=2))
+                            received.append(request)
+                            ws.send(json.dumps({"type": "response", "id": request["id"], "payload": {"returnValue": True}}))
+            except BaseException as error:
+                failures.append(error)
+        thread = threading.Thread(target=television, daemon=True)
+        thread.start()
+        try:
+            ws, key = self.connect(clients, client_key="saved-key")
+            self.assertEqual("wire-key", key)
+            for uri in ("ssap://audio/volumeUp", "ssap://com.webos.service.networkinput/getPointerInputSocket", "ssap://system.notifications/createAlert"):
+                self.assertTrue(cli._send_request(ws, uri, {})["returnValue"])
+            thread.join(3)
+            self.assertFalse(thread.is_alive())
+            self.assertFalse(failures)
+            self.assertEqual(5, len(received))
+            self.assertNotIn("signed", received[1]["payload"]["manifest"])
+        finally:
+            for pair in pairs:
+                for sock in pair: sock.close()
+
+    def test_enrichment_retains_the_successful_mode_in_callers_config(self):
+        first, second = FakeSocket("blacklist"), FakeSocket()
+        with patch.object(cli.WebSocket, "connect", side_effect=[first, second]):
+            cli._fetch_macs_via_ws("192.0.2.1", "saved-key", cfg=self.cfg)
+        cli._save_config(self.cfg)
+        self.assertTrue(cli._load_config()["devices"]["192.0.2.1"]["lg_uses_unsigned_registration"])
 
     def test_invalid_pin_is_rejected_and_socket_closed(self):
         ws = FakeSocket(fresh=True)

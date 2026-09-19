@@ -25,7 +25,7 @@ import urllib.parse
 import uuid
 from typing import Any, Optional
 
-__version__ = "1.6.1"
+__version__ = "1.6.2"
 
 # ---------------------------------------------------------------------------
 # Minimal WebSocket client (RFC 6455) — no external dependencies
@@ -710,7 +710,7 @@ def _format_mac(mac: str) -> str:
     return ":".join(clean[i:i+2] for i in range(0, 12, 2))
 
 
-def _fetch_macs_via_ws(ip: str, client_key: str) -> dict:
+def _fetch_macs_via_ws(ip: str, client_key: str, cfg=None) -> dict:
     """Fetch real MAC addresses via WebSocket (most reliable method).
 
     Tries multiple endpoints matching what the iOS app does:
@@ -719,7 +719,7 @@ def _fetch_macs_via_ws(ip: str, client_key: str) -> dict:
     """
     macs: dict[str, str] = {}
     try:
-        ws, _ = _ws_connect(ip, client_key, timeout=5)
+        ws, _ = _ws_connect(ip, client_key, timeout=5, cfg=cfg)
 
         endpoints = [
             "ssap://com.webos.service.connectionmanager/getinfo",
@@ -778,7 +778,7 @@ def _do_pair(ip: str, cfg: dict) -> bool:
 
     print("  Paired successfully!")
     print("  Fetching MAC addresses...")
-    macs = _fetch_macs_via_ws(ip, key)
+    macs = _fetch_macs_via_ws(ip, key, cfg=cfg)
     if macs:
         cfg["devices"][ip].update(macs)
         _save_config(cfg)
@@ -837,7 +837,7 @@ def cmd_scan(args):
             print(f"    Status: already paired")
             # Fetch MACs if missing
             if not device.get("mac") and not device.get("wifi_mac"):
-                macs = _fetch_macs_via_ws(ip, device["client_key"])
+                macs = _fetch_macs_via_ws(ip, device["client_key"], cfg=cfg)
                 if macs:
                     device.update(macs)
                     _save_config(cfg)
@@ -912,7 +912,7 @@ def cmd_add(args):
     elif device.get("client_key") and not device.get("mac") and not device.get("wifi_mac"):
         # Already paired but missing MACs — fetch them
         print("Fetching MAC addresses...")
-        macs = _fetch_macs_via_ws(ip, device["client_key"])
+        macs = _fetch_macs_via_ws(ip, device["client_key"], cfg=cfg)
         if macs:
             device.update(macs)
             _save_config(cfg)
@@ -2272,7 +2272,7 @@ def cmd_enrich(args):
     client_key = device.get("client_key")
     if client_key:
         print("  Fetching MAC addresses via WebSocket...")
-        macs = _fetch_macs_via_ws(ip, client_key)
+        macs = _fetch_macs_via_ws(ip, client_key, cfg=cfg)
         if macs:
             device.update(macs)
             for k, v in macs.items():
