@@ -339,3 +339,11 @@ Turning Hotel Mode off in the installation menu (hold the Settings button on LG'
 ## License
 
 MIT
+
+### Newer LG firmware (1.6.1)
+
+Connections retain the original signed registration for existing TVs. If newer webOS firmware rejects its certificate or leaves registration unanswered, the CLI retries once using the full unsigned permission set. It remembers the successful mode per TV. This applies to every command, including keyboard input, navigation/number/colour keys, app launching, scenes, advanced settings, raw requests and self-test.
+
+Run `lgtv pair` for an interactive eight-digit PIN or approval prompt. Background commands never submit a PIN or retry after rejected consent. Existing pairing keys are retained during the compatibility retry.
+
+Regression checks: `python3 -m unittest discover -s tests -v`. Actual firmware support for individual advanced controls still depends on the TV; `lgtv selftest` reports what it acknowledges.

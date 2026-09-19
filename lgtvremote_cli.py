@@ -25,7 +25,7 @@ import urllib.parse
 import uuid
 from typing import Any, Optional
 
-__version__ = "1.6.0"
+__version__ = "1.6.1"
 
 # ---------------------------------------------------------------------------
 # Minimal WebSocket client (RFC 6455) — no external dependencies
@@ -378,63 +378,92 @@ REGISTRATION_PAYLOAD = {
 }
 
 
-def _ws_connect(ip: str, client_key: Optional[str] = None, timeout: float = 10.0) -> tuple:
-    """Connect and register with the TV. Returns (websocket, client_key)."""
-    uri = f"wss://{ip}:3001"
-    ws = WebSocket.connect(uri, timeout=timeout)
+BLACKLISTED_CERTIFICATE = "403 Pairing rejected: blacklisted certificate detected"
 
-    # Register
-    reg = dict(REGISTRATION_PAYLOAD)
+
+def _registration_payload(client_key=None, unsigned=False):
+    # Never mutate the signed payload: older TVs retain their original identity.
+    payload = json.loads(json.dumps(REGISTRATION_PAYLOAD))
+    payload.update(pairingType="PROMPT" if client_key else "PIN", forcePairing=client_key is None)
     if client_key:
-        reg["client-key"] = client_key
-        pairing_type = "prompt"
-    else:
-        pairing_type = "pin"
+        payload["client-key"] = client_key
+    if unsigned:
+        manifest = payload["manifest"]
+        signed = manifest.pop("signed", {})
+        manifest.pop("signatures", None)
+        manifest["permissions"] = sorted(set(manifest.get("permissions", []) + signed.get("permissions", [])))
+    return payload
 
-    reg_msg = {
-        "type": "register",
-        "id": str(uuid.uuid4()),
-        "payload": {**reg, "pairingType": pairing_type, "forcePairing": client_key is None},
-    }
 
-    ws.send(json.dumps(reg_msg, ensure_ascii=False, separators=(",", ":")))
+def _ws_connect(ip: str, client_key: Optional[str] = None, timeout: float = 10.0,
+                *, cfg=None, pin_provider=None) -> tuple:
+    """Register once, with one unsigned retry before consent; close failed sockets.
 
-    # Wait for registration response
-    new_key = client_key
-    registered = False
-    start = time.monotonic()
-
-    while time.monotonic() - start < timeout:
+    All commands, including pointer input, scenes and raw SSAP, use this path.
+    Only interactive pairing supplies a PIN provider. Remember the successful
+    mode in the caller's config so later key/cache saves cannot overwrite it.
+    """
+    cfg = _load_config() if cfg is None else cfg
+    unsigned = cfg.get("devices", {}).get(ip, {}).get("lg_uses_unsigned_registration", False)
+    while True:
+        ws = WebSocket.connect(f"wss://{ip}:3001", timeout=timeout)
+        registration_id = str(uuid.uuid4())
+        pin_id = None
+        consent_started = False
+        registration_answered = False
+        retry = False
         try:
-            raw = ws.recv(timeout=max(1, timeout - (time.monotonic() - start)))
-        except (socket.timeout, TimeoutError):
-            break
-        except ConnectionError:
-            break
-
-        resp = json.loads(raw)
-        resp_type = resp.get("type", "")
-        payload = resp.get("payload", {})
-
-        if resp_type == "registered":
-            new_key = payload.get("client-key", client_key)
-            registered = True
-            break
-        elif resp_type == "response" and "client-key" in payload:
-            new_key = payload["client-key"]
-            registered = True
-            break
-        elif resp_type == "error":
-            error_msg = resp.get("error", "Unknown error")
-            raise ConnectionError(f"Registration failed: {error_msg}")
-        elif "pairingType" in payload and payload.get("pairingType") == "pin":
-            if not client_key:
-                raise ConnectionError("NEEDS_PIN")
-
-    if not registered:
-        raise ConnectionError("Registration timed out — is the TV on and reachable?")
-
-    return ws, new_key
+            ws.send(json.dumps({"type": "register", "id": registration_id,
+                                "payload": _registration_payload(client_key, unsigned)}))
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                try:
+                    raw = ws.recv(timeout=max(0.01, deadline - time.monotonic()))
+                except (socket.timeout, TimeoutError):
+                    break
+                response = json.loads(raw)
+                response_id = response.get("id")
+                if response_id not in (registration_id, pin_id) or response_id is None:
+                    continue
+                registration_answered = True
+                kind = response.get("type")
+                payload = response.get("payload") or {}
+                if kind == "error":
+                    error = response.get("error", "Unknown error")
+                    if (response_id == registration_id and error == BLACKLISTED_CERTIFICATE
+                            and not unsigned and not consent_started):
+                        retry = True
+                        break
+                    raise ConnectionError(f"Registration failed: {error}")
+                if kind in ("registered", "response") and payload.get("client-key"):
+                    new_key = payload["client-key"]
+                    device = cfg.setdefault("devices", {}).setdefault(ip, {"ip": ip, "name": ip})
+                    device.update(client_key=new_key, lg_uses_unsigned_registration=unsigned)
+                    _save_config(cfg)
+                    return ws, new_key
+                pairing_type = str(payload.get("pairingType", "")).upper()
+                if pairing_type in ("PIN", "PROMPT"):
+                    consent_started = True
+                    if pin_provider is None:
+                        raise ConnectionError("NEEDS_PIN")
+                    deadline = time.monotonic() + 60
+                    if pairing_type == "PIN" and pin_id is None:
+                        pin = pin_provider().strip()
+                        if len(pin) != 8 or not pin.isascii() or not pin.isdigit():
+                            raise ConnectionError("PIN must contain exactly eight digits")
+                        pin_id = str(uuid.uuid4())
+                        ws.send(json.dumps({"type": "request", "id": pin_id,
+                                            "uri": "ssap://pairing/setPin", "payload": {"pin": pin}}))
+                        deadline = time.monotonic() + timeout
+            if not retry:
+                retry = not unsigned and not registration_answered and not consent_started
+            if not retry:
+                raise ConnectionError("Registration timed out — is the TV on and reachable?")
+        except BaseException:
+            ws.close()
+            raise
+        ws.close()
+        unsigned = True
 
 
 def _send_request(ws: WebSocket, uri: str, payload: Optional[dict] = None, subscribe: bool = False) -> dict:
@@ -741,87 +770,28 @@ def _do_pair(ip: str, cfg: dict) -> bool:
     print(f"Pairing with {name} ({ip})...")
 
     try:
-        ws = WebSocket.connect(f"wss://{ip}:3001", timeout=10)
-    except (OSError, TimeoutError, ConnectionError) as e:
-        print(f"  Could not connect: {e}")
+        ws, key = _ws_connect(ip, cfg=cfg, pin_provider=lambda: input("  Enter the PIN shown on your TV: "))
+        ws.close()
+    except (OSError, TimeoutError, ConnectionError, EOFError, ValueError) as error:
+        print(f"  Pairing failed: {error}")
         return False
 
-    reg_msg = {
-        "type": "register",
-        "id": str(uuid.uuid4()),
-        "payload": {
-            **REGISTRATION_PAYLOAD,
-            "pairingType": "PIN",
-            "forcePairing": False,
-        },
-    }
-    ws.send(json.dumps(reg_msg))
-
-    pin_requested = False
-    start = time.monotonic()
-    while time.monotonic() - start < 60:
-        try:
-            raw = ws.recv(timeout=30)
-        except (socket.timeout, TimeoutError, ConnectionError):
-            break
-
-        resp = json.loads(raw)
-        resp_type = resp.get("type", "")
-        payload = resp.get("payload", {})
-
-        if resp_type == "registered" or "client-key" in payload:
-            key = payload.get("client-key")
-            if key:
-                cfg["devices"][ip]["client_key"] = key
-                _save_config(cfg)
-                print("  Paired successfully!")
-                ws.close()
-
-                # Fetch real MAC addresses
-                print("  Fetching MAC addresses...")
-                macs = _fetch_macs_via_ws(ip, key)
-                if macs:
-                    cfg["devices"][ip].update(macs)
-                    _save_config(cfg)
-                    for k, v in macs.items():
-                        label = "MAC (wired)" if k == "mac" else "MAC (wifi)"
-                        print(f"  {label}: {v}")
-
-                # Cache input labels
-                print("  Fetching input labels...")
-                try:
-                    result = _connect_and_send(
-                        ip, cfg, "ssap://tv/getExternalInputList",
-                        wait_response=True,
-                    )
-                    if result and "devices" in result:
-                        _cache_input_labels(ip, result["devices"])
-                        count = len([d for d in result["devices"] if d.get("label", "").strip()])
-                        print(f"  Cached {count} input label(s).")
-                except (OSError, TimeoutError, ConnectionError):
-                    pass  # Non-critical — labels will be cached on next 'inputs' call
-
-                return True
-
-        elif payload.get("pairingType") in ("PIN", "pin") and not pin_requested:
-            pin = input("  Enter the PIN shown on your TV: ").strip()
-            pin_msg = {
-                "type": "request",
-                "id": str(uuid.uuid4()),
-                "uri": "ssap://pairing/setPin",
-                "payload": {"pin": pin},
-            }
-            ws.send(json.dumps(pin_msg))
-            pin_requested = True
-
-        elif resp_type == "error":
-            print(f"  Pairing failed: {resp.get('error', 'Unknown error')}")
-            ws.close()
-            return False
-
-    print("  Pairing timed out.")
-    ws.close()
-    return False
+    print("  Paired successfully!")
+    print("  Fetching MAC addresses...")
+    macs = _fetch_macs_via_ws(ip, key)
+    if macs:
+        cfg["devices"][ip].update(macs)
+        _save_config(cfg)
+        for field, value in macs.items():
+            print(f"  {'MAC (wired)' if field == 'mac' else 'MAC (wifi)'}: {value}")
+    print("  Fetching input labels...")
+    try:
+        result = _connect_and_send(ip, cfg, "ssap://tv/getExternalInputList", wait_response=True)
+        if result and "devices" in result:
+            _cache_input_labels(ip, result["devices"])
+    except (OSError, TimeoutError, ConnectionError):
+        pass
+    return True
 
 
 def cmd_scan(args):
@@ -1021,7 +991,7 @@ def _connect_and_send(ip: str, cfg: dict, uri: str, payload: Optional[dict] = No
     client_key = device.get("client_key")
 
     try:
-        ws, new_key = _ws_connect(ip, client_key)
+        ws, new_key = _ws_connect(ip, client_key, cfg=cfg)
     except ConnectionError as e:
         if "NEEDS_PIN" in str(e):
             print("Error: TV requires pairing. Run 'lgtv pair' first.", file=sys.stderr)
@@ -1110,7 +1080,7 @@ def _run_luna_calls(args, calls: list) -> bool:
     client_key = device.get("client_key")
 
     try:
-        ws, new_key = _ws_connect(ip, client_key)
+        ws, new_key = _ws_connect(ip, client_key, cfg=cfg)
     except ConnectionError as e:
         if "NEEDS_PIN" in str(e):
             print("Error: TV requires pairing. Run 'lgtv pair' first.", file=sys.stderr)
@@ -1209,7 +1179,7 @@ def cmd_power_status(args):
     client_key = device.get("client_key")
 
     try:
-        ws, _ = _ws_connect(ip, client_key, timeout=3.0)
+        ws, _ = _ws_connect(ip, client_key, timeout=3.0, cfg=cfg)
     except (ConnectionError, OSError, TimeoutError):
         status = {"power": "off", "ip": ip, "name": device.get("name", ip)}
         print(json.dumps(status))
@@ -1326,7 +1296,7 @@ def cmd_nav(args):
     try:
         device = cfg["devices"].get(ip, {})
         client_key = device.get("client_key")
-        ws, new_key = _ws_connect(ip, client_key)
+        ws, new_key = _ws_connect(ip, client_key, cfg=cfg)
 
         if new_key and new_key != client_key:
             if ip not in cfg["devices"]:
@@ -2077,7 +2047,7 @@ def cmd_scene_run(args):
 
     client_key = device.get("client_key")
     try:
-        ws, new_key = _ws_connect(ip, client_key)
+        ws, new_key = _ws_connect(ip, client_key, cfg=cfg)
     except ConnectionError as e:
         if "NEEDS_PIN" in str(e):
             print("Error: TV requires pairing. Run 'lgtv pair' first.", file=sys.stderr)
@@ -2167,7 +2137,7 @@ def cmd_number(args):
 
     try:
         device = cfg["devices"].get(ip, {})
-        ws, new_key = _ws_connect(ip, device.get("client_key"))
+        ws, new_key = _ws_connect(ip, device.get("client_key"), cfg=cfg)
 
         if new_key and new_key != device.get("client_key"):
             cfg["devices"].setdefault(ip, {"ip": ip, "name": ip})["client_key"] = new_key
@@ -2221,7 +2191,7 @@ def cmd_color(args):
 
     try:
         device = cfg["devices"].get(ip, {})
-        ws, new_key = _ws_connect(ip, device.get("client_key"))
+        ws, new_key = _ws_connect(ip, device.get("client_key"), cfg=cfg)
 
         if new_key and new_key != device.get("client_key"):
             cfg["devices"].setdefault(ip, {"ip": ip, "name": ip})["client_key"] = new_key
@@ -2353,7 +2323,7 @@ def cmd_raw(args):
 
     try:
         client_key = cfg["devices"].get(ip, {}).get("client_key")
-        ws, new_key = _ws_connect(ip, client_key)
+        ws, new_key = _ws_connect(ip, client_key, cfg=cfg)
         if new_key and new_key != client_key:
             cfg["devices"].setdefault(ip, {"ip": ip, "name": ip})["client_key"] = new_key
             _save_config(cfg)
@@ -2468,7 +2438,7 @@ def cmd_self_test(args):
     print("Passed = the TV acknowledged the command, not that it visibly reacted.\n")
 
     try:
-        ws, new_key = _ws_connect(ip, device.get("client_key"))
+        ws, new_key = _ws_connect(ip, device.get("client_key"), cfg=cfg)
     except ConnectionError as e:
         if "NEEDS_PIN" in str(e):
             print("Error: TV requires pairing. Run 'lgtv pair' first.", file=sys.stderr)

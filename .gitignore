@@ -8,3 +8,6 @@ build/
 .venv/
 venv/
 .DS_Store
+
+# Local generated code-navigation graph
+graphify-out/
