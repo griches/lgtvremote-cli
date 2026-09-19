@@ -25,7 +25,7 @@ import urllib.parse
 import uuid
 from typing import Any, Optional
 
-__version__ = "1.6.2"
+__version__ = "1.6.3"
 
 # ---------------------------------------------------------------------------
 # Minimal WebSocket client (RFC 6455) — no external dependencies
@@ -2381,7 +2381,9 @@ def _self_test_power_cycle(ip: str, device: dict, record) -> None:
 
     client_key = device.get("client_key")
     try:
-        ws, _ = _ws_connect(ip, client_key, timeout=5.0)
+        # Registration can rotate the key. The wake verification must use
+        # the accepted key from this connection, not the pre-test snapshot.
+        ws, client_key = _ws_connect(ip, client_key, timeout=5.0)
         start = time.monotonic()
         resp = _send_request(ws, "ssap://system/turnOff")
         ws.close()

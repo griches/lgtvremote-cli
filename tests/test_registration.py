@@ -193,6 +193,31 @@ class RegistrationTests(unittest.TestCase):
         self.assertTrue(ws.closed)
         self.assertEqual(1, len(ws.sent))
 
+    def test_default_command_reloads_repaired_key_and_mode(self):
+        from types import SimpleNamespace
+        cli._save_config(self.cfg)
+        repaired = cli._load_config()
+        repaired["devices"]["192.0.2.1"].update(client_key="repaired-key", lg_uses_unsigned_registration=True)
+        cli._save_config(repaired)
+        ws = FakeSocket()
+        with patch.object(cli.WebSocket, "connect", return_value=ws):
+            cli._run_command(SimpleNamespace(tv=None), "ssap://audio/getVolume", wait_response=True)
+        self.assertEqual("repaired-key", ws.sent[0]["payload"]["client-key"])
+        self.assertNotIn("signed", ws.sent[0]["payload"]["manifest"])
+        self.assertEqual("192.0.2.1", cli._load_config()["default"])
+
+    def test_power_cycle_reconnect_uses_refreshed_registration_key(self):
+        self.cfg["devices"]["192.0.2.1"]["mac"] = "02:00:00:00:00:01"
+        self.cfg["devices"]["192.0.2.1"]["lg_uses_unsigned_registration"] = True
+        cli._save_config(self.cfg)
+        first, second = FakeSocket(), FakeSocket()
+        with patch.object(cli.WebSocket, "connect", side_effect=[first, second]), \
+             patch.object(cli.time, "sleep"), patch.object(cli, "_send_wol"):
+            cli._self_test_power_cycle("192.0.2.1", self.cfg["devices"]["192.0.2.1"], lambda *args: None)
+        self.assertEqual("saved-key", first.sent[0]["payload"]["client-key"])
+        self.assertEqual("new-key", second.sent[0]["payload"]["client-key"])
+        self.assertNotIn("signed", second.sent[0]["payload"]["manifest"])
+
 
 if __name__ == "__main__":
     unittest.main()
