@@ -347,3 +347,15 @@ Connections retain the original signed registration for existing TVs. If newer w
 Run `lgtv pair` for an interactive eight-digit PIN or approval prompt. Background commands never submit a PIN or retry after rejected consent. Existing pairing keys are retained during the compatibility retry.
 
 Regression checks: `python3 -m unittest discover -s tests -v`. Actual firmware support for individual advanced controls still depends on the TV; `lgtv selftest` reports what it acknowledges.
+
+
+### LG standby power recovery (iOS build 45 parity)
+`lgtv power` wakes a TV that cannot open its control socket or closes it before
+any registration reply. `lgtv off` treats that condition as already off or
+unreachable and never wakes it. Pairing refusals and silent registration
+remain errors; a failed power-off write never triggers a wake in the same command.
+Power commands use a one-second socket connection timeout while retaining the
+normal registration timeout and compatibility retry. Probe decisions and
+Wake-on-LAN packet counts/destinations go to stderr. Packet delivery does not
+confirm the panel has awakened. `lgtv scan` now refreshes reported MAC addresses
+even if already populated; `lgtv enrich` continues to replace discovery guesses.

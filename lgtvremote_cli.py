@@ -66,49 +66,55 @@ class WebSocket:
 
         # Create TCP socket
         raw_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        raw_sock.settimeout(timeout)
-        raw_sock.connect((host, port))
+        sock = raw_sock
+        try:
+            raw_sock.settimeout(timeout)
+            raw_sock.connect((host, port))
 
-        if use_ssl:
-            ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-            ssl_ctx.check_hostname = False
-            ssl_ctx.verify_mode = ssl.CERT_NONE
-            sock = ssl_ctx.wrap_socket(raw_sock, server_hostname=host)
-        else:
-            sock = raw_sock
+            if use_ssl:
+                ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                ssl_ctx.check_hostname = False
+                ssl_ctx.verify_mode = ssl.CERT_NONE
+                sock = ssl_ctx.wrap_socket(raw_sock, server_hostname=host)
+            else:
+                sock = raw_sock
 
-        # WebSocket handshake
-        ws_key = base64.b64encode(random.randbytes(16)).decode()
-        handshake = (
-            f"GET {path} HTTP/1.1\r\n"
-            f"Host: {host}:{port}\r\n"
-            f"Upgrade: websocket\r\n"
-            f"Connection: Upgrade\r\n"
-            f"Sec-WebSocket-Key: {ws_key}\r\n"
-            f"Sec-WebSocket-Version: 13\r\n"
-            f"\r\n"
-        )
-        sock.sendall(handshake.encode())
+            # WebSocket handshake
+            ws_key = base64.b64encode(random.randbytes(16)).decode()
+            handshake = (
+                f"GET {path} HTTP/1.1\r\n"
+                f"Host: {host}:{port}\r\n"
+                f"Upgrade: websocket\r\n"
+                f"Connection: Upgrade\r\n"
+                f"Sec-WebSocket-Key: {ws_key}\r\n"
+                f"Sec-WebSocket-Version: 13\r\n"
+                f"\r\n"
+            )
+            sock.sendall(handshake.encode())
 
-        # Read response headers
-        response = b""
-        while b"\r\n\r\n" not in response:
-            chunk = sock.recv(4096)
-            if not chunk:
-                raise ConnectionError("Connection closed during handshake")
-            response += chunk
+            # Read response headers
+            response = b""
+            while b"\r\n\r\n" not in response:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    raise ConnectionError("Connection closed during handshake")
+                response += chunk
 
-        status_line = response.split(b"\r\n")[0].decode()
-        if "101" not in status_line:
-            raise ConnectionError(f"WebSocket handshake failed: {status_line}")
+            status_line = response.split(b"\r\n")[0].decode()
+            if "101" not in status_line:
+                raise ConnectionError(f"WebSocket handshake failed: {status_line}")
 
-        ws = cls(sock)
+            ws = cls(sock)
 
-        # If there's leftover data after headers, buffer it
-        header_end = response.index(b"\r\n\r\n") + 4
-        ws._recv_buffer = response[header_end:]
+            # If there's leftover data after headers, buffer it
+            header_end = response.index(b"\r\n\r\n") + 4
+            ws._recv_buffer = response[header_end:]
 
-        return ws
+            return ws
+        except BaseException:
+            sock.close()
+            raw_sock.close()
+            raise
 
     def send(self, message: str):
         """Send a text message."""
@@ -152,10 +158,10 @@ class WebSocket:
             except OSError:
                 pass
             self._closed = True
-            try:
-                self._sock.close()
-            except OSError:
-                pass
+        try:
+            self._sock.close()
+        except OSError:
+            pass
 
     def _send_frame(self, opcode: int, data: bytes):
         """Send a WebSocket frame (always masked, as required for clients)."""
@@ -395,8 +401,16 @@ def _registration_payload(client_key=None, unsigned=False):
     return payload
 
 
+class LGUnavailableError(ConnectionError):
+    """No socket, or a socket dropped before any registration reply (LG standby)."""
+
+
+class LGRegistrationError(ConnectionError):
+    """An answering TV refused registration or left it incomplete; never infer off."""
+
+
 def _ws_connect(ip: str, client_key: Optional[str] = None, timeout: float = 10.0,
-                *, cfg=None, pin_provider=None) -> tuple:
+                *, cfg=None, pin_provider=None, socket_timeout=None) -> tuple:
     """Register once, with one unsigned retry before consent; close failed sockets.
 
     All commands, including pointer input, scenes and raw SSAP, use this path.
@@ -405,8 +419,15 @@ def _ws_connect(ip: str, client_key: Optional[str] = None, timeout: float = 10.0
     """
     cfg = _load_config() if cfg is None else cfg
     unsigned = cfg.get("devices", {}).get(ip, {}).get("lg_uses_unsigned_registration", False)
+    reached_socket = False
     while True:
-        ws = WebSocket.connect(f"wss://{ip}:3001", timeout=timeout)
+        try:
+            ws = WebSocket.connect(f"wss://{ip}:3001", timeout=timeout if socket_timeout is None else socket_timeout)
+        except (OSError, TimeoutError) as error:
+            if reached_socket:
+                raise LGRegistrationError("TV answered earlier, but compatibility reconnect failed; no wake sent") from error
+            raise LGUnavailableError(f"TV did not open its control socket: {error}") from error
+        reached_socket = True
         registration_id = str(uuid.uuid4())
         pin_id = None
         consent_started = False
@@ -421,6 +442,10 @@ def _ws_connect(ip: str, client_key: Optional[str] = None, timeout: float = 10.0
                     raw = ws.recv(timeout=max(0.01, deadline - time.monotonic()))
                 except (socket.timeout, TimeoutError):
                     break
+                except (ConnectionError, OSError) as error:
+                    if not registration_answered and not consent_started:
+                        raise LGUnavailableError("TV dropped the socket before any registration reply (standby)") from error
+                    raise LGRegistrationError("TV disconnected after answering registration") from error
                 response = json.loads(raw)
                 response_id = response.get("id")
                 if response_id not in (registration_id, pin_id) or response_id is None:
@@ -434,7 +459,7 @@ def _ws_connect(ip: str, client_key: Optional[str] = None, timeout: float = 10.0
                             and not unsigned and not consent_started):
                         retry = True
                         break
-                    raise ConnectionError(f"Registration failed: {error}")
+                    raise LGRegistrationError(f"Registration failed: {error}")
                 if kind in ("registered", "response") and payload.get("client-key"):
                     new_key = payload["client-key"]
                     device = cfg.setdefault("devices", {}).setdefault(ip, {"ip": ip, "name": ip})
@@ -445,7 +470,7 @@ def _ws_connect(ip: str, client_key: Optional[str] = None, timeout: float = 10.0
                 if pairing_type in ("PIN", "PROMPT"):
                     consent_started = True
                     if pin_provider is None:
-                        raise ConnectionError("NEEDS_PIN")
+                        raise LGRegistrationError("NEEDS_PIN")
                     deadline = time.monotonic() + 60
                     if pairing_type == "PIN" and pin_id is None:
                         pin = pin_provider().strip()
@@ -458,7 +483,14 @@ def _ws_connect(ip: str, client_key: Optional[str] = None, timeout: float = 10.0
             if not retry:
                 retry = not unsigned and not registration_answered and not consent_started
             if not retry:
-                raise ConnectionError("Registration timed out — is the TV on and reachable?")
+                raise LGRegistrationError("TV opened its socket but registration timed out; no wake sent")
+        except OSError as error:
+            ws.close()
+            if isinstance(error, (LGUnavailableError, LGRegistrationError)):
+                raise
+            if not registration_answered and not consent_started and not isinstance(error, TimeoutError):
+                raise LGUnavailableError("Socket dropped before any registration reply (standby)") from error
+            raise LGRegistrationError(f"Registration did not complete: {error}") from error
         except BaseException:
             ws.close()
             raise
@@ -526,17 +558,19 @@ def _send_wol(mac: str, ip: Optional[str] = None):
             targets.insert(0, f"{parts[0]}.{parts[1]}.{parts[2]}.255")
             targets.append(ip)
 
+    sent = 0
     for port in (9, 7):
         for target in targets:
             try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-                s.sendto(packet, (target, port))
-                s.close()
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                    s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+                    s.sendto(packet, (target, port))
+                    sent += 1
             except OSError:
                 pass
 
-    return True
+    print(f"WOL {mac}: sent {sent}/{len(targets) * 2} packets to {', '.join(targets)} ports 9/7", file=sys.stderr)
+    return sent > 0
 
 
 # ---------------------------------------------------------------------------
@@ -835,12 +869,11 @@ def cmd_scan(args):
             print(f"    Model: {info['model']}")
         if already_paired:
             print(f"    Status: already paired")
-            # Fetch MACs if missing
-            if not device.get("mac") and not device.get("wifi_mac"):
-                macs = _fetch_macs_via_ws(ip, device["client_key"], cfg=cfg)
-                if macs:
-                    device.update(macs)
-                    _save_config(cfg)
+            # The TV's own report replaces discovery guesses, even populated ones.
+            macs = _fetch_macs_via_ws(ip, device["client_key"], cfg=cfg)
+            if macs:
+                device.update(macs)
+                _save_config(cfg)
             if device.get("mac"):
                 print(f"    MAC: {device['mac']}")
             if device.get("wifi_mac"):
@@ -1127,38 +1160,64 @@ def cmd_on(args):
         print("Error: No MAC address stored for this TV. Use 'lgtv add <ip> --mac <mac>'.", file=sys.stderr)
         sys.exit(1)
 
-    for mac in macs:
-        _send_wol(mac, ip)
+    sent = [_send_wol(mac, ip) for mac in dict.fromkeys(macs)]
+    if not any(sent):
+        print("Error: No Wake-on-LAN packets could be sent.", file=sys.stderr)
+        sys.exit(1)
     print(f"Wake-on-LAN sent to {device.get('name', ip)}")
 
 
-def cmd_off(args):
-    """Turn off the TV."""
-    _run_command(args, "ssap://system/turnOff")
-    print("TV powered off.")
-
-
-def cmd_power(args):
-    """Toggle TV power (off via WebSocket, on via WOL)."""
+def _power_command(args, *, toggle):
     cfg = _load_config()
     ip = _get_device_ip(cfg, args.tv)
     if not ip:
         print("Error: No TV specified and no default set.", file=sys.stderr)
         sys.exit(1)
-
+    device = cfg["devices"].get(ip, {})
+    if not device.get("client_key"):
+        print("Error: Pair this TV first with 'lgtv pair'.", file=sys.stderr)
+        sys.exit(1)
+    started = time.monotonic()
     try:
-        _connect_and_send(ip, cfg, "ssap://system/turnOff", wait_response=False)
-        print("TV powered off.")
-    except (ConnectionError, OSError, TimeoutError):
-        device = cfg["devices"].get(ip, {})
-        macs = [m for m in [device.get("mac"), device.get("wifi_mac")] if m]
-        if macs:
-            for mac in macs:
-                _send_wol(mac, ip)
-            print(f"TV appears off. Wake-on-LAN sent.")
-        else:
-            print("Error: TV unreachable and no MAC address for WOL.", file=sys.stderr)
+        ws, _ = _ws_connect(ip, device["client_key"], cfg=cfg, socket_timeout=1.0)
+    except LGUnavailableError as error:
+        print(f"Power probe ({time.monotonic() - started:.3f}s): {error}", file=sys.stderr)
+        if not toggle:
+            print("TV is already off or unreachable; no wake sent.")
+            return
+        macs = list(dict.fromkeys(m for m in (device.get("mac"), device.get("wifi_mac")) if m))
+        if not macs:
+            print("Error: No stored MAC address for Wake-on-LAN.", file=sys.stderr)
             sys.exit(1)
+        sent = [_send_wol(mac, ip) for mac in macs]
+        if not any(sent):
+            print("Error: No Wake-on-LAN packets could be sent.", file=sys.stderr)
+            sys.exit(1)
+        print("Wake-on-LAN sent; TV wake is not yet confirmed.")
+        return
+    except (ConnectionError, OSError, TimeoutError) as error:
+        print(f"Error: {error}; power command stopped, no wake sent.", file=sys.stderr)
+        sys.exit(1)
+    try:
+        _send_button(ws, "ssap://system/turnOff")
+        print("Power-off command sent.")
+    except (ConnectionError, OSError) as error:
+        # The write may already have powered off the TV. Never turn a failed
+        # or ambiguous off write into a wake packet in the same tap.
+        print(f"Error: Power-off write failed: {error}; no wake sent.", file=sys.stderr)
+        sys.exit(1)
+    finally:
+        ws.close()
+
+
+def cmd_off(args):
+    """Explicit off never wakes a TV; standby registration drops count as off."""
+    _power_command(args, toggle=False)
+
+
+def cmd_power(args):
+    """Toggle power; wake only an unavailable or pre-registration-drop TV."""
+    _power_command(args, toggle=True)
 
 
 def cmd_power_status(args):

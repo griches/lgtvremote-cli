@@ -219,5 +219,89 @@ class RegistrationTests(unittest.TestCase):
         self.assertNotIn("signed", second.sent[0]["payload"]["manifest"])
 
 
+class PowerParityTests(unittest.TestCase):
+    def setUp(self):
+        RegistrationTests.setUp(self)
+        from types import SimpleNamespace
+        self.args = SimpleNamespace(tv=None)
+        self.cfg["devices"]["192.0.2.1"].update(mac="38:06:E6:2E:0D:BE", wifi_mac="38:06:E6:2E:0D:BE")
+        cli._save_config(self.cfg)
+
+    def test_scan_replaces_guessed_mac_without_erasing_wifi(self):
+        self.cfg["devices"]["192.0.2.1"]["mac"] = "02:00:00:00:00:01"
+        cli._save_config(self.cfg)
+        with patch.object(cli, "_ssdp_discover", return_value=[{"ip": "192.0.2.1", "name": "TV"}]), patch.object(cli, "_enrich_device", return_value={}), patch.object(cli, "_fetch_macs_via_ws", return_value={"mac": "38:06:E6:2E:0D:BE"}) as fetch:
+            cli.cmd_scan(self.args)
+        fetch.assert_called_once()
+        saved = cli._load_config()["devices"]["192.0.2.1"]
+        self.assertEqual("38:06:E6:2E:0D:BE", saved["mac"])
+        self.assertEqual("38:06:E6:2E:0D:BE", saved["wifi_mac"])
+        self.assertEqual("saved-key", saved["client_key"])
+
+    def test_failed_compatibility_reconnect_does_not_erase_answering_tv_evidence(self):
+        for mode in ("silent", "blacklist"):
+            with patch.object(cli.WebSocket, "connect", side_effect=[FakeSocket(mode), TimeoutError()]), patch.object(cli, "_send_wol") as wol:
+                with self.assertRaises(SystemExit):
+                    cli.cmd_power(self.args)
+                wol.assert_not_called()
+
+    def test_standby_drop_wakes_once_after_socket_closed(self):
+        ws = FakeSocket("disconnect")
+        def wake(mac, ip):
+            self.assertTrue(ws.closed)
+            self.assertEqual((mac, ip), ("38:06:E6:2E:0D:BE", "192.0.2.1"))
+            return True
+        with patch.object(cli.WebSocket, "connect", return_value=ws) as connect, patch.object(cli, "_send_wol", side_effect=wake) as wol:
+            cli.cmd_power(self.args)
+        wol.assert_called_once()
+        self.assertEqual(1.0, connect.call_args.kwargs["timeout"])
+        self.assertEqual(1, len(ws.sent))
+
+    def test_explicit_off_on_standby_never_wakes(self):
+        ws = FakeSocket("disconnect")
+        with patch.object(cli.WebSocket, "connect", return_value=ws), patch.object(cli, "_send_wol") as wol:
+            cli.cmd_off(self.args)
+        wol.assert_not_called()
+        self.assertTrue(ws.closed)
+
+    def test_refusal_and_silent_registration_never_wake_or_claim_off(self):
+        for mode in ("denied", "silent", "prompt-blacklist"):
+            for command in (cli.cmd_power, cli.cmd_off):
+                with self.subTest(mode=mode, command=command.__name__):
+                    sockets = [FakeSocket(mode), FakeSocket(mode)]
+                    with patch.object(cli.WebSocket, "connect", side_effect=sockets), patch.object(cli, "_send_wol") as wol:
+                        with self.assertRaises(SystemExit) as error:
+                            command(self.args)
+                        self.assertEqual(1, error.exception.code)
+                        wol.assert_not_called()
+                    self.assertTrue(sockets[0].closed)
+
+    def test_awake_off_and_rotated_credentials_persist(self):
+        ws = FakeSocket()
+        with patch.object(cli.WebSocket, "connect", return_value=ws), patch.object(cli, "_send_wol") as wol:
+            cli.cmd_power(self.args)
+        self.assertEqual("ssap://system/turnOff", ws.sent[-1]["uri"])
+        self.assertEqual("new-key", cli._load_config()["devices"]["192.0.2.1"]["client_key"])
+        self.assertTrue(ws.closed)
+        wol.assert_not_called()
+
+    def test_failed_off_write_does_not_wake_the_tv_back_up(self):
+        ws = FakeSocket()
+        with patch.object(cli.WebSocket, "connect", return_value=ws), patch.object(cli, "_send_button", side_effect=ConnectionError("closed")), patch.object(cli, "_send_wol") as wol:
+            with self.assertRaises(SystemExit):
+                cli.cmd_power(self.args)
+        wol.assert_not_called()
+        self.assertTrue(ws.closed)
+
+    def test_unreachable_without_mac_fails(self):
+        self.cfg["devices"]["192.0.2.1"].pop("mac")
+        self.cfg["devices"]["192.0.2.1"].pop("wifi_mac")
+        cli._save_config(self.cfg)
+        with patch.object(cli.WebSocket, "connect", side_effect=TimeoutError()), patch.object(cli, "_send_wol") as wol:
+            with self.assertRaises(SystemExit):
+                cli.cmd_power(self.args)
+        wol.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
