@@ -45,3 +45,7 @@ evidence survives the retry, so this error cannot be reclassified as asleep.
 ## Release authorization — 22 September 2026
 
 User authorized committing, tagging, pushing and submitting this port. Existing automated evidence above applies; physical LG wake timing and cold background hardware execution remain untested. Release version updated without runtime changes.
+
+### Verified delivery
+
+1.6.4: 20 tests, build and twine checks passed. PyPI and GitHub published; source/wheel hashes match local artifacts. Tag v1.6.4 / 8f75640 pushed. Physical LG wake timing and cold hardware execution remain untested. Full family evidence: lgtvremote/docs/release-process/2026-09-22-release-train.md.
