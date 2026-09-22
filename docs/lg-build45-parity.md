@@ -41,3 +41,7 @@ UDP sends fail rather than printing success. No hardware success claims are made
 
 Final review also covers a failed compatibility reconnect: prior socket-open
 evidence survives the retry, so this error cannot be reclassified as asleep.
+
+## Release authorization — 22 September 2026
+
+User authorized committing, tagging, pushing and submitting this port. Existing automated evidence above applies; physical LG wake timing and cold background hardware execution remain untested. Release version updated without runtime changes.
